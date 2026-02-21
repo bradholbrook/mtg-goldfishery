@@ -167,6 +167,82 @@ export function parseMoxfieldDecklist(text, deckName = 'Unnamed Deck') {
   return { deck, errors };
 }
 
+// ─── Moxfield API Import ──────────────────────────────────────────────────────
+
+/**
+ * Parse the primary card type from a Scryfall/Moxfield type_line string.
+ * e.g. "Legendary Creature — Human Wizard" → "Creature"
+ *      "Basic Land — Forest"               → "Land"
+ *      "Artifact Creature — Golem"         → "Creature"  (creature takes priority over artifact)
+ */
+export function typeFromTypeLine(typeLine) {
+  if (!typeLine) return 'Unknown';
+  const main = typeLine.split('—')[0].toLowerCase();
+  if (main.includes('land'))         return 'Land';
+  if (main.includes('creature'))     return 'Creature';
+  if (main.includes('instant'))      return 'Instant';
+  if (main.includes('sorcery'))      return 'Sorcery';
+  if (main.includes('artifact'))     return 'Artifact';
+  if (main.includes('enchantment'))  return 'Enchantment';
+  if (main.includes('planeswalker')) return 'Planeswalker';
+  if (main.includes('battle'))       return 'Battle';
+  return 'Other';
+}
+
+/**
+ * Parse a Moxfield API v2 deck response into our DeckConfig format.
+ * The API provides real type_line data so no name-guessing is needed.
+ *
+ * @param {Object} apiData      - Parsed JSON from api2.moxfield.com/v2/decks/all/{publicId}
+ * @param {string} nameOverride - Optional user-entered name; falls back to apiData.name
+ * @returns {{ deck: DeckConfig, errors: string[] }}
+ */
+export function parseMoxfieldApiResponse(apiData, nameOverride = '') {
+  const errors = [];
+  const cards = [];
+  let commanderName = null;
+
+  function processSection(section, isCommander) {
+    if (!section || typeof section !== 'object') return;
+    for (const entry of Object.values(section)) {
+      const { quantity, card } = entry;
+      if (!card || !card.name) continue;
+      if (isCommander && !commanderName) commanderName = card.name;
+      cards.push({
+        name: card.name,
+        quantity: quantity || 1,
+        types: [typeFromTypeLine(card.type_line)],
+        isCommander: !!isCommander,
+      });
+    }
+  }
+
+  processSection(apiData.commanders, true);
+  processSection(apiData.mainboard, false);
+  // Sideboard / maybeboard / companions intentionally excluded — not part of the 100
+
+  const totalCards = cards.reduce((sum, c) => sum + c.quantity, 0);
+  if (totalCards === 0) {
+    errors.push('No cards found in the Moxfield API response.');
+  } else if (totalCards < 99 || totalCards > 101) {
+    errors.push(`Found ${totalCards} cards — expected 100 for Commander. Proceeding anyway.`);
+  }
+
+  const deck = {
+    id: generateId(),
+    name: nameOverride || apiData.name || 'Unnamed Deck',
+    commander: commanderName,
+    format: 'commander',
+    cards,
+    importedAt: new Date().toISOString(),
+    moxfieldUrl: apiData.publicId
+      ? `https://www.moxfield.com/decks/${apiData.publicId}`
+      : null,
+  };
+
+  return { deck, errors };
+}
+
 /**
  * Quick sanity summary of a parsed deck for display.
  */

@@ -5,7 +5,7 @@
  * Handles all user events.
  */
 
-import { parseMoxfieldDecklist } from './parser.js';
+import { parseMoxfieldDecklist, parseMoxfieldApiResponse } from './parser.js';
 import { runSimulation } from './simulator.js';
 import {
   addDeck, removeDeck, addResults,
@@ -36,50 +36,88 @@ function refresh() {
 
 // ─── Import Panel ─────────────────────────────────────────────────────────────
 
+const MOXFIELD_URL_RE = /moxfield\.com\/decks\/([\w-]+)/i;
+
 function bindImportPanel() {
-  const importBtn = document.getElementById('import-btn');
+  const importBtn     = document.getElementById('import-btn');
   const importTextarea = document.getElementById('import-textarea');
   const importNameInput = document.getElementById('import-name');
-  const importToggle = document.getElementById('import-toggle');
-  const importPanel = document.getElementById('import-panel');
+  const importToggle  = document.getElementById('import-toggle');
+  const importPanel   = document.getElementById('import-panel');
 
-  // Toggle panel
+  function clearImportPanel() {
+    if (importTextarea)  importTextarea.value = '';
+    if (importNameInput) importNameInput.value = '';
+    importPanel?.classList.add('hidden');
+    if (importToggle) importToggle.textContent = '+ Import Deck';
+  }
+
+  // Toggle panel visibility
   importToggle?.addEventListener('click', () => {
     importPanel.classList.toggle('hidden');
     importToggle.textContent = importPanel.classList.contains('hidden')
       ? '+ Import Deck' : '− Cancel';
   });
 
-  importBtn?.addEventListener('click', () => {
+  importBtn?.addEventListener('click', async () => {
     const text = importTextarea?.value?.trim();
     if (!text) {
-      showToast('Paste a decklist first.', 'warn');
+      showToast('Paste a decklist or Moxfield URL first.', 'warn');
       return;
     }
 
-    const name = importNameInput?.value?.trim() || 'Unnamed Deck';
-    const { deck, errors } = parseMoxfieldDecklist(text, name);
+    const name = importNameInput?.value?.trim() || '';
+    const urlMatch = text.match(MOXFIELD_URL_RE);
 
-    if (errors.length > 0) {
+    if (urlMatch) {
+      // ── URL import path ──────────────────────────────────────────────────
+      const publicId = urlMatch[1];
+      importBtn.disabled = true;
+      importBtn.textContent = '⏳ Fetching…';
+
+      try {
+        const res = await fetch(`https://api2.moxfield.com/v2/decks/all/${publicId}`);
+        if (!res.ok) throw new Error(`Moxfield returned HTTP ${res.status}`);
+
+        const apiData = await res.json();
+        const { deck, errors } = parseMoxfieldApiResponse(apiData, name);
+
+        errors.forEach(e => showToast(e, 'warn'));
+
+        if (deck.cards.length === 0) {
+          showToast('Could not parse any cards from Moxfield.', 'error');
+          return;
+        }
+
+        addDeck(deck);
+        activeDeckId = deck.id;
+        clearImportPanel();
+        showToast(`Imported "${deck.name}" — ${deck.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
+        refresh();
+      } catch (err) {
+        showToast(`Moxfield fetch failed: ${err.message}`, 'error');
+      } finally {
+        importBtn.disabled = false;
+        importBtn.textContent = 'Import';
+      }
+
+    } else {
+      // ── Plain-text paste path ────────────────────────────────────────────
+      const { deck, errors } = parseMoxfieldDecklist(text, name || 'Unnamed Deck');
+
       errors.forEach(e => showToast(e, 'warn'));
+
+      if (deck.cards.length === 0) {
+        showToast('Could not parse any cards. Check the format.', 'error');
+        return;
+      }
+
+      addDeck(deck);
+      activeDeckId = deck.id;
+      clearImportPanel();
+      showToast(`Imported "${deck.name}" — ${deck.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
+      refresh();
     }
-
-    if (deck.cards.length === 0) {
-      showToast('Could not parse any cards. Check the format.', 'error');
-      return;
-    }
-
-    addDeck(deck);
-    activeDeckId = deck.id;
-
-    // Clear form and hide panel
-    if (importTextarea) importTextarea.value = '';
-    if (importNameInput) importNameInput.value = '';
-    importPanel?.classList.add('hidden');
-    if (importToggle) importToggle.textContent = '+ Import Deck';
-
-    showToast(`Imported "${deck.name}" — ${deck.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
-    refresh();
   });
 }
 
