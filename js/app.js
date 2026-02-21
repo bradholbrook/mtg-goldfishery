@@ -158,9 +158,9 @@ function bindSaveLoad() {
     if (!file) return;
 
     try {
-      const { loaded, warnings } = await loadFromFile(file);
+      const { decks: decksLoaded, results: resultsLoaded, warnings } = await loadFromFile(file);
       warnings?.forEach(w => showToast(w, 'warn'));
-      showToast(`Loaded ${loaded.decks} deck(s), ${loaded.results} result(s).`, 'success');
+      showToast(`Loaded ${decksLoaded} deck(s), ${resultsLoaded} result(s).`, 'success');
 
       // Select first loaded deck
       const decks = (await import('./storage.js')).getDecks();
