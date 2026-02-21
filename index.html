@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>MTG Goldfish — Commander Simulator</title>
+  <meta name="description" content="Simulate Commander deck opening hands and consistency stats. No login, no ads, runs in your browser." />
+  <link rel="stylesheet" href="css/style.css" />
+
+  <!-- Favicon: fishing emoji as SVG data URI -->
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🎣</text></svg>" />
+</head>
+<body>
+
+<div class="app-shell">
+
+  <!-- ── Header ──────────────────────────────────────────── -->
+  <header class="app-header">
+    <div class="app-logo">
+      <span class="logo-icon">🎣</span>
+      <div>
+        MTG Goldfish
+        <div class="logo-sub">Commander Simulator</div>
+      </div>
+    </div>
+    <div class="header-actions">
+      <button id="load-btn" class="btn-secondary" title="Load a previously saved .json file">
+        ↑ Load
+      </button>
+      <input id="load-input" type="file" accept=".json" style="display:none" />
+      <button id="save-btn" class="btn-secondary" title="Save all decks and results to a .json file">
+        ↓ Save
+      </button>
+    </div>
+  </header>
+
+  <!-- ── Sidebar ─────────────────────────────────────────── -->
+  <aside class="app-sidebar">
+
+    <!-- Import -->
+    <div class="sidebar-section">
+      <button id="import-toggle" class="import-toggle-btn">+ Import Deck</button>
+
+      <div id="import-panel" class="import-panel hidden">
+        <div>
+          <div class="input-label">Deck Name</div>
+          <input
+            id="import-name"
+            type="text"
+            class="input-text"
+            placeholder="My cEDH Deck"
+            maxlength="60"
+          />
+        </div>
+        <div>
+          <div class="input-label">Moxfield Decklist</div>
+          <textarea
+            id="import-textarea"
+            class="input-text"
+            placeholder="Paste your Moxfield plain-text export here...
+
+Commander
+1 Atraxa, Praetors' Voice
+
+Deck
+1 Sol Ring
+1 Arcane Signet
+..."
+          ></textarea>
+        </div>
+        <button id="import-btn" class="btn-primary">Import</button>
+      </div>
+    </div>
+
+    <!-- Deck list -->
+    <div class="sidebar-section sidebar-label">My Decks</div>
+    <div id="deck-list"></div>
+
+  </aside>
+
+  <!-- ── Main ────────────────────────────────────────────── -->
+  <main class="app-main">
+    <div id="active-deck">
+      <div class="empty-state" style="margin-top: 80px;">
+        <span class="empty-icon">🎣</span>
+        <p style="font-family: var(--font-display); font-size: 18px; font-weight: 700; color: var(--text-secondary);">
+          Welcome to MTG Goldfish
+        </p>
+        <p class="muted" style="max-width: 320px; text-align: center; margin-top: 6px;">
+          Import a Moxfield Commander decklist from the sidebar to begin simulating opening hands.
+        </p>
+      </div>
+    </div>
+  </main>
+
+</div>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
