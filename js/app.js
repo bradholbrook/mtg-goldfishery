@@ -38,6 +38,11 @@ function refresh() {
 
 const MOXFIELD_URL_RE = /moxfield\.com\/decks\/([\w-]+)/i;
 
+// Moxfield's API doesn't set CORS headers, so browsers block direct fetches.
+// corsproxy.io proxies the request server-side and adds CORS headers for us.
+// Swap this constant if a self-hosted proxy is added later.
+const CORS_PROXY = 'https://corsproxy.io/?url=';
+
 function bindImportPanel() {
   const importBtn     = document.getElementById('import-btn');
   const importTextarea = document.getElementById('import-textarea');
@@ -76,7 +81,8 @@ function bindImportPanel() {
       importBtn.textContent = '⏳ Fetching…';
 
       try {
-        const res = await fetch(`https://api2.moxfield.com/v2/decks/all/${publicId}`);
+        const apiUrl = `https://api2.moxfield.com/v2/decks/all/${publicId}`;
+        const res = await fetch(CORS_PROXY + encodeURIComponent(apiUrl));
         if (!res.ok) throw new Error(`Moxfield returned HTTP ${res.status}`);
 
         const apiData = await res.json();
