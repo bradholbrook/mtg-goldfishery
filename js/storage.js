@@ -108,7 +108,7 @@ export function saveToFile() {
 
   const a = document.createElement('a');
   a.href = url;
-  a.download = `mtg-goldfish-${formatDateForFilename(new Date())}.json`;
+  a.download = buildSaveFilename(appState.decks);
   a.click();
 
   URL.revokeObjectURL(url);
@@ -187,8 +187,50 @@ function mergeLoadedData(data) {
   };
 }
 
+// ─── Good Hand Definitions ────────────────────────────────────────────────────
+
+/**
+ * Upsert a GoodHandDef on the deck identified by deckId.
+ * If def.id already exists it's replaced; otherwise it's appended.
+ */
+export function updateDeckGoodHandDefs(deckId, def) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  if (!Array.isArray(deck.goodHandDefs)) deck.goodHandDefs = [];
+  const idx = deck.goodHandDefs.findIndex(d => d.id === def.id);
+  if (idx >= 0) {
+    deck.goodHandDefs[idx] = def;
+  } else {
+    deck.goodHandDefs.push(def);
+  }
+}
+
+/**
+ * Remove a GoodHandDef by id from the specified deck.
+ */
+export function removeGoodHandDef(deckId, defId) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck?.goodHandDefs) return;
+  deck.goodHandDefs = deck.goodHandDefs.filter(d => d.id !== defId);
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatDateForFilename(date) {
   return date.toISOString().slice(0, 16).replace('T', '-').replace(':', '');
+}
+
+/**
+ * Build a save filename that includes deck names and a timestamp.
+ * e.g. "mtg-goldfish-raffine-reanimator-2026-02-21-1430.json"
+ */
+function buildSaveFilename(decks) {
+  const stamp = formatDateForFilename(new Date());
+  if (!decks.length) return `mtg-goldfish-${stamp}.json`;
+  const nameSlug = decks
+    .slice(0, 3)
+    .map(d => d.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 20))
+    .filter(Boolean)
+    .join('_');
+  return `mtg-goldfish-${nameSlug || 'decks'}-${stamp}.json`;
 }

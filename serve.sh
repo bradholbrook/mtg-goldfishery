@@ -6,5 +6,4 @@
 # Then open: http://localhost:8080
 
 cd "$(dirname "$0")"
-echo "Serving at http://localhost:8080  (Ctrl+C to stop)"
-python3 -m http.server 8080
+python3 dev-server.py 8080

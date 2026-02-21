@@ -248,6 +248,8 @@ textarea.input-text {
   font-size: 13px;
   color: var(--text-primary);
   line-height: 1.3;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .deck-card-meta {
@@ -286,7 +288,8 @@ textarea.input-text {
   font-weight: 800;
   font-size: 22px;
   color: var(--text-primary);
-  letter-spacing: -0.01em;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .deck-stats {
@@ -433,9 +436,23 @@ textarea.input-text {
 
 .hand-chart-row {
   display: grid;
-  grid-template-columns: 120px 1fr 48px;
+  grid-template-columns: 120px 1fr 48px 60px;
   align-items: center;
   gap: 10px;
+}
+
+.hand-chart-seen {
+  font-size: 12px;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+.hand-chart-header {
+  margin-bottom: 2px;
+}
+
+.hand-chart-header .hand-chart-bar-track {
+  background: transparent;
 }
 
 .hand-chart-label {
@@ -640,4 +657,119 @@ textarea.input-text {
 ::-webkit-scrollbar { width: 6px; height: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
+
+/* ─── Good Hand Definitions ─────────────────────────────────── */
+
+.def-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 10px;
+  background: var(--bg-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  margin-bottom: 6px;
+}
+
+.def-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.def-item-name {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.def-item-desc {
+  font-size: 11px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.def-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.def-pct {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 12px;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+}
+
+.def-pct--good { color: var(--green);  border-color: var(--green-dim);  background: var(--green-dim); }
+.def-pct--warn { color: var(--yellow); border-color: var(--yellow-dim); background: var(--yellow-dim); }
+.def-pct--bad  { color: var(--red);    border-color: var(--red-dim);    background: var(--red-dim); }
+.def-pct--none { color: var(--text-muted); }
+
+.def-editor {
+  background: var(--bg-2);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-lg);
+  padding: 14px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.def-editor-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.def-editor-actions {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.criterion-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-bottom: 6px;
+}
+
+.select-sm {
+  font-size: 11px;
+  padding: 5px 26px 5px 8px;
+}
+
+.input-number {
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 8px;
+  width: 56px;
+  text-align: center;
+}
+
+.input-number:focus { outline: none; border-color: var(--accent-dim); }
+
+.btn-sm {
+  font-size: 11px;
+  padding: 5px 12px;
+}
 ::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }

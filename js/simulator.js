@@ -9,6 +9,7 @@
  */
 
 import { CARD_TYPES } from './types.js';
+import { evaluateGoodHandDef } from './criteria.js';
 
 // ─── Deck Flattening ──────────────────────────────────────────────────────────
 
@@ -116,7 +117,7 @@ export function getPrimaryType(types) {
  * @param {DeckConfig} deck
  * @returns {Object} summary stats
  */
-function computeSummary(hands, deck) {
+function computeSummary(hands, deck, goodHandDefs = []) {
   const n = hands.length;
   if (n === 0) return {};
 
@@ -134,10 +135,10 @@ function computeSummary(hands, deck) {
     typeSeenPct[type] = parseFloat(((count / n) * 100).toFixed(1));
   }
 
-  // % of hands with 2-4 lands (the "keepable land count" heuristic)
+  // % of hands with 3-4 lands (the "keepable land count" heuristic)
   const goodLandHandCount = hands.filter(h => {
     const lands = h.typeCounts['Land'] || 0;
-    return lands >= 2 && lands <= 4;
+    return lands >= 3 && lands <= 4;
   }).length;
   const goodLandHandPct = parseFloat(((goodLandHandCount / n) * 100).toFixed(1));
 
@@ -153,12 +154,29 @@ function computeSummary(hands, deck) {
     deckTypeDistribution[type] = parseFloat(((count / flatDeck.length) * 100).toFixed(1));
   }
 
+  // % of hands satisfying each good hand definition
+  const goodHandDefPcts = {};
+  for (const def of goodHandDefs) {
+    const count = hands.filter(h => evaluateGoodHandDef(def, h.hand)).length;
+    goodHandDefPcts[def.id] = parseFloat(((count / n) * 100).toFixed(1));
+  }
+
+  // % of hands satisfying at least one good hand definition
+  const goodHandAnyCount = goodHandDefs.length > 0
+    ? hands.filter(h => goodHandDefs.some(def => evaluateGoodHandDef(def, h.hand))).length
+    : null;
+  const goodHandAnyPct = goodHandAnyCount !== null
+    ? parseFloat(((goodHandAnyCount / n) * 100).toFixed(1))
+    : null;
+
   return {
     avgTypeCounts,
     typeSeenPct,
     goodLandHandPct,
     deckTypeDistribution,
     totalCardsInDeck: flatDeck.length,
+    goodHandDefPcts,
+    goodHandAnyPct,
     // Future: avgKillTurn, commanderOnCurvePct, keyCardSeenByTurnN
   };
 }
@@ -172,7 +190,7 @@ function computeSummary(hands, deck) {
  * @param {number} [gameCount=1000]
  * @returns {SimulationResults}
  */
-export function runSimulation(deck, gameCount = 1000) {
+export function runSimulation(deck, gameCount = 1000, goodHandDefs = []) {
   const flatDeck = flattenDeck(deck);
 
   if (flatDeck.length < 7) {
@@ -184,7 +202,7 @@ export function runSimulation(deck, gameCount = 1000) {
     hands.push(simulateOpeningHand(flatDeck));
   }
 
-  const summary = computeSummary(hands, deck);
+  const summary = computeSummary(hands, deck, goodHandDefs);
 
   return {
     deckId: deck.id,

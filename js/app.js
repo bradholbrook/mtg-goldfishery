@@ -10,14 +10,25 @@ import { runSimulation } from './simulator.js';
 import {
   addDeck, removeDeck, addResults,
   getDeckById, saveToFile, loadFromFile,
+  updateDeckGoodHandDefs, removeGoodHandDef,
 } from './storage.js';
 import {
   renderDeckList, renderActiveDeck, renderSimResults, showToast,
 } from './ui.js';
+import { generateId } from './types.js';
+import { CRITERION_TYPES } from './criteria.js';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let activeDeckId = null;
+
+/**
+ * When non-null, the active deck panel shows the definition editor.
+ * Shape: { defId: string|null, name: string, criteria: Criterion[] }
+ *   defId = null  → creating a new definition
+ *   defId = uuid  → editing an existing definition
+ */
+let editingDef = null;
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
@@ -31,7 +42,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function refresh() {
   renderDeckList(handleSelectDeck, handleDeleteDeck);
-  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation);
+  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation, editingDef);
 }
 
 // ─── Import Panel ─────────────────────────────────────────────────────────────
@@ -131,16 +142,13 @@ function bindImportPanel() {
 
 function handleSelectDeck(deckId) {
   activeDeckId = deckId;
+  editingDef = null; // clear any in-progress edit when switching decks
 
-  // Highlight selected card
   document.querySelectorAll('.deck-card').forEach(el => {
     el.classList.toggle('deck-card--active', el.dataset.deckId === deckId);
   });
 
-  renderActiveDeck(getDeckById(deckId), handleRunSimulation);
-
-  // Show latest results if any
-  const { getResultsForDeck } = window._storage || {};
+  renderActiveDeck(getDeckById(deckId), handleRunSimulation, editingDef);
 }
 
 function handleDeleteDeck(deckId) {
@@ -156,6 +164,101 @@ function handleDeleteDeck(deckId) {
   refresh();
 }
 
+// ─── Good Hand Definition Actions ────────────────────────────────────────────
+//
+// Exposed on window.__ghh so that inline onclick= attributes in ui.js templates
+// can reach them without circular imports or prop-drilling callbacks.
+// All mutating actions call refresh() to re-render from the updated state.
+
+function freshCriterion() {
+  const firstType = Object.values(CRITERION_TYPES)[0];
+  return { type: firstType.id, ...firstType.defaultValues() };
+}
+
+window.__ghh = {
+
+  addDef() {
+    editingDef = { defId: null, name: '', criteria: [freshCriterion()] };
+    refresh();
+  },
+
+  editDef(defId) {
+    const deck = getDeckById(activeDeckId);
+    const def = deck?.goodHandDefs?.find(d => d.id === defId);
+    if (!def) return;
+    // Deep-copy so edits don't mutate the stored def until Save
+    editingDef = { defId, name: def.name, criteria: def.criteria.map(c => ({ ...c })) };
+    refresh();
+  },
+
+  removeDef(defId) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck || !confirm('Remove this good hand definition?')) return;
+    removeGoodHandDef(deck.id, defId);
+    refresh();
+  },
+
+  saveDef() {
+    if (!editingDef) return;
+    // Read name directly from DOM as safety net (oninput may not fire on rapid click)
+    const nameEl = document.getElementById('def-name-input');
+    const name = (nameEl?.value ?? editingDef.name).trim();
+    if (!name) { showToast('Give this definition a name.', 'warn'); return; }
+    if (!editingDef.criteria.length) { showToast('Add at least one criterion.', 'warn'); return; }
+
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+
+    updateDeckGoodHandDefs(deck.id, {
+      id: editingDef.defId || generateId(),
+      name,
+      criteria: editingDef.criteria,
+    });
+
+    editingDef = null;
+    refresh();
+    showToast(`Saved "${name}"`, 'success');
+  },
+
+  cancelEdit() {
+    editingDef = null;
+    refresh();
+  },
+
+  addCrit() {
+    if (!editingDef) return;
+    editingDef.criteria.push(freshCriterion());
+    refresh();
+  },
+
+  removeCrit(idx) {
+    if (!editingDef) return;
+    editingDef.criteria.splice(idx, 1);
+    refresh();
+  },
+
+  /** Change the TYPE of a criterion — structural change, triggers re-render */
+  changeType(idx, type) {
+    if (!editingDef) return;
+    const typeInfo = CRITERION_TYPES[type];
+    if (!typeInfo) return;
+    editingDef.criteria[idx] = { type, ...typeInfo.defaultValues() };
+    refresh();
+  },
+
+  /** Update a criterion value — no re-render needed */
+  setVal(idx, key, val) {
+    if (!editingDef?.criteria[idx]) return;
+    editingDef.criteria[idx][key] = val;
+  },
+
+  /** Update the definition name — no re-render needed */
+  setName(val) {
+    if (!editingDef) return;
+    editingDef.name = val;
+  },
+};
+
 // ─── Simulation ───────────────────────────────────────────────────────────────
 
 function handleRunSimulation(deckId, gameCount) {
@@ -168,7 +271,12 @@ function handleRunSimulation(deckId, gameCount) {
   // Defer to next tick so the UI updates before the heavy loop
   setTimeout(() => {
     try {
-      const results = runSimulation(deck, gameCount);
+      const goodHandDefs = deck.goodHandDefs || [];
+      const results = runSimulation(deck, gameCount, goodHandDefs);
+      // Store def names alongside pcts so results panel can display them
+      results.goodHandDefNames = Object.fromEntries(
+        goodHandDefs.map(d => [d.id, d.name])
+      );
       addResults(results);
       renderSimResults(results);
       showToast(`Simulated ${gameCount.toLocaleString()} games`, 'success');

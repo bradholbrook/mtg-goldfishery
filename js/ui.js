@@ -7,6 +7,7 @@
 
 import { CARD_TYPES } from './types.js';
 import { getDecks, getResults, getResultsForDeck } from './storage.js';
+import { CRITERION_TYPES, CRITERION_TYPE_OPTIONS } from './criteria.js';
 
 // ─── Type Colors ─────────────────────────────────────────────────────────────
 
@@ -78,7 +79,7 @@ export function renderDeckList(onSelectDeck, onDeleteDeck) {
 
 // ─── Active Deck Panel ────────────────────────────────────────────────────────
 
-export function renderActiveDeck(deck, onRunSimulation) {
+export function renderActiveDeck(deck, onRunSimulation, editingDef = null) {
   const container = document.getElementById('active-deck');
   if (!container) return;
 
@@ -119,6 +120,8 @@ export function renderActiveDeck(deck, onRunSimulation) {
       <div class="section-label">Deck Composition</div>
       ${typeBreakdownHTML}
     </div>
+
+    ${buildGoodHandSection(deck, editingDef, getResultsForDeck(deck.id))}
 
     <div class="sim-controls section">
       <div class="section-label">Simulate Opening Hands</div>
@@ -161,12 +164,7 @@ export function renderSimResults(results) {
       </div>
 
       <div class="results-grid">
-        ${buildResultCard(
-          'Good Opening Hands',
-          `${summary.goodLandHandPct}%`,
-          'Hands with 2–4 lands',
-          summary.goodLandHandPct >= 60 ? 'good' : summary.goodLandHandPct >= 40 ? 'warn' : 'bad'
-        )}
+        ${buildGoodHandsPctCard(summary)}
         ${buildResultCard(
           'Avg Lands in Hand',
           summary.avgTypeCounts['Land']?.toFixed(2) ?? '—',
@@ -181,11 +179,10 @@ export function renderSimResults(results) {
         )}
       </div>
 
-      <div class="section-label" style="margin-top:20px">Average Card Types in Opening Hand</div>
-      ${buildHandTypeChart(summary.avgTypeCounts, 7)}
+      <div class="section-label" style="margin-top:20px">Opening Hand Type Breakdown</div>
+      ${buildCombinedTypeChart(summary.avgTypeCounts, summary.typeSeenPct, 7)}
 
-      <div class="section-label" style="margin-top:20px">% of Hands Containing Each Type</div>
-      ${buildSeenPctBars(summary.typeSeenPct)}
+      ${buildGoodHandDefResults(results)}
     </div>
   `;
 }
@@ -230,54 +227,253 @@ function buildResultCard(label, value, sublabel, quality) {
     </div>`;
 }
 
-function buildHandTypeChart(avgCounts, handSize) {
-  // Horizontal bar chart — avg count out of 7
+/**
+ * Build the "Good Opening Hands" stat card.
+ * Uses goodHandAnyPct (% matching any definition) when definitions exist,
+ * otherwise falls back to the land-count heuristic.
+ */
+function buildGoodHandsPctCard(summary) {
+  const anyPct = summary.goodHandAnyPct;
+  if (anyPct !== null && anyPct !== undefined) {
+    const quality = anyPct >= 60 ? 'good' : anyPct >= 40 ? 'warn' : 'bad';
+    return buildResultCard('Good Opening Hands', `${anyPct}%`, 'Matches any good hand definition', quality);
+  }
+  // Fallback: land heuristic
+  const landPct = summary.goodLandHandPct;
+  const quality = landPct >= 60 ? 'good' : landPct >= 40 ? 'warn' : 'bad';
+  return buildResultCard('Good Opening Hands', `${landPct}%`, 'Hands with 3–4 lands (add definitions to customize)', quality);
+}
+
+/**
+ * Combined chart: avg count per type (bar) + % of hands containing each type.
+ */
+function buildCombinedTypeChart(avgCounts, seenPcts, handSize) {
   const entries = Object.entries(avgCounts)
     .filter(([, v]) => v > 0)
     .sort(([, a], [, b]) => b - a);
 
   return `
     <div class="hand-chart">
+      <div class="hand-chart-row hand-chart-header">
+        <div class="hand-chart-label"></div>
+        <div class="hand-chart-bar-track"></div>
+        <div class="hand-chart-value muted" style="font-size:10px">Avg</div>
+        <div class="hand-chart-seen muted" style="font-size:10px">% of Hands</div>
+      </div>
       ${entries.map(([type, avg]) => {
-        const pct = (avg / handSize) * 100;
+        const barPct = (avg / handSize) * 100;
+        const seenPct = seenPcts[type] ?? 0;
+        const color = TYPE_COLORS[type] || TYPE_COLORS.Other;
         return `
           <div class="hand-chart-row">
             <div class="hand-chart-label">
-              <span class="legend-dot" style="background:${TYPE_COLORS[type] || TYPE_COLORS.Other}"></span>
+              <span class="legend-dot" style="background:${color}"></span>
               ${type}
             </div>
             <div class="hand-chart-bar-track">
-              <div class="hand-chart-bar"
-                style="width:${pct}%;background:${TYPE_COLORS[type] || TYPE_COLORS.Other}">
-              </div>
+              <div class="hand-chart-bar" style="width:${barPct}%;background:${color}"></div>
             </div>
             <div class="hand-chart-value">${avg.toFixed(2)}</div>
+            <div class="hand-chart-seen muted">${seenPct}%</div>
           </div>`;
       }).join('')}
     </div>`;
 }
 
-function buildSeenPctBars(typeSeenPct) {
-  const entries = Object.entries(typeSeenPct)
-    .filter(([, v]) => v > 0)
-    .sort(([, a], [, b]) => b - a);
+// ─── Good Hand Section ────────────────────────────────────────────────────────
+
+/**
+ * Render the full "Good Hand Definitions" config section.
+ * Embeds the inline editor when editingDef is non-null.
+ * Uses window.__ghh.* for all mutations (no callback props needed).
+ */
+function buildGoodHandSection(deck, editingDef, allResults) {
+  const defs = deck.goodHandDefs || [];
+  const latestResult = allResults[allResults.length - 1] || null;
+
+  const defListHTML = defs.map(def => {
+    const pct = latestResult?.summary?.goodHandDefPcts?.[def.id];
+    const pctBadge = pct !== undefined
+      ? `<span class="def-pct ${pct >= 60 ? 'def-pct--good' : pct >= 40 ? 'def-pct--warn' : 'def-pct--bad'}">${pct}%</span>`
+      : `<span class="def-pct def-pct--none">—</span>`;
+    const criteriaDesc = def.criteria.map(c => {
+      const t = CRITERION_TYPES[c.type];
+      return t ? t.describe(c) : c.type;
+    }).join(' + ');
+
+    return `
+      <div class="def-item">
+        <div class="def-item-info">
+          <span class="def-item-name">${escapeHtml(def.name)}</span>
+          <span class="def-item-desc muted">${escapeHtml(criteriaDesc)}</span>
+        </div>
+        <div class="def-item-actions">
+          ${pctBadge}
+          <button class="btn-icon" onclick="window.__ghh.editDef('${def.id}')" title="Edit">✏</button>
+          <button class="btn-icon btn-danger" onclick="window.__ghh.removeDef('${def.id}')" title="Remove">✕</button>
+        </div>
+      </div>`;
+  }).join('');
+
+  const editorHTML = editingDef ? buildGoodHandEditor(editingDef, deck) : '';
+  const addBtn = editingDef
+    ? ''
+    : `<button class="btn-secondary btn-sm" onclick="window.__ghh.addDef()">+ Add Definition</button>`;
 
   return `
-    <div class="hand-chart">
-      ${entries.map(([type, pct]) => `
-        <div class="hand-chart-row">
-          <div class="hand-chart-label">
-            <span class="legend-dot" style="background:${TYPE_COLORS[type] || TYPE_COLORS.Other}"></span>
-            ${type}
-          </div>
-          <div class="hand-chart-bar-track">
-            <div class="hand-chart-bar"
-              style="width:${pct}%;background:${TYPE_COLORS[type] || TYPE_COLORS.Other}">
-            </div>
-          </div>
-          <div class="hand-chart-value">${pct}%</div>
-        </div>`).join('')}
+    <div class="section">
+      <div class="section-label">Good Hand Definitions</div>
+      ${defs.length === 0 && !editingDef
+        ? `<p class="muted" style="font-size:12px;margin-bottom:10px">No definitions yet. Define what a keepable hand looks like.</p>`
+        : defListHTML}
+      ${editorHTML}
+      ${addBtn}
     </div>`;
+}
+
+/**
+ * Render the inline editor for adding or modifying a GoodHandDef.
+ */
+function buildGoodHandEditor(editingDef, deck) {
+  const criteriaRows = editingDef.criteria.map((crit, idx) =>
+    buildCriterionRow(crit, idx, deck)
+  ).join('');
+
+  return `
+    <div class="def-editor">
+      <div class="def-editor-field">
+        <label class="input-label">Definition Name</label>
+        <input id="def-name-input" class="input-text" type="text"
+          value="${escapeHtml(editingDef.name)}"
+          placeholder="e.g. Keepable Ramp Hand"
+          oninput="window.__ghh.setName(this.value)" />
+      </div>
+      <div class="def-editor-field">
+        <label class="input-label">Criteria <span class="muted">(all must be true)</span></label>
+        <div id="criteria-list">
+          ${criteriaRows}
+        </div>
+        <button class="btn-secondary btn-sm" style="margin-top:6px"
+          onclick="window.__ghh.addCrit()">+ Add Criterion</button>
+      </div>
+      <div class="def-editor-actions">
+        <button class="btn-primary" onclick="window.__ghh.saveDef()">Save Definition</button>
+        <button class="btn-secondary" onclick="window.__ghh.cancelEdit()">Cancel</button>
+      </div>
+    </div>`;
+}
+
+/**
+ * Render a single criterion row: [type dropdown] [field widgets] [remove btn].
+ */
+function buildCriterionRow(crit, idx, deck) {
+  const typeSelect = `
+    <select class="select select-sm" onchange="window.__ghh.changeType(${idx}, this.value)">
+      ${CRITERION_TYPE_OPTIONS.map(ct =>
+        `<option value="${ct.id}" ${ct.id === crit.type ? 'selected' : ''}>${ct.label}</option>`
+      ).join('')}
+    </select>`;
+
+  const typeInfo = CRITERION_TYPES[crit.type];
+  const fieldWidgets = typeInfo
+    ? typeInfo.fields.map(f => buildFieldWidget(f, crit, idx, deck)).join('')
+    : '';
+
+  return `
+    <div class="criterion-row">
+      ${typeSelect}
+      ${fieldWidgets}
+      <button class="btn-icon btn-danger" onclick="window.__ghh.removeCrit(${idx})" title="Remove">✕</button>
+    </div>`;
+}
+
+/**
+ * Render a single field widget inside a criterion row.
+ */
+function buildFieldWidget(field, crit, idx, deck) {
+  const val = crit[field.key];
+
+  if (field.widget === 'card_select') {
+    const names = [...new Set(deck.cards.map(c => c.name))].sort();
+    const opts = names.map(n =>
+      `<option value="${escapeHtml(n)}" ${n === val ? 'selected' : ''}>${escapeHtml(n)}</option>`
+    ).join('');
+    return `
+      <select class="select select-sm"
+        onchange="window.__ghh.setVal(${idx}, '${field.key}', this.value)">
+        <option value="">— pick a card —</option>
+        ${opts}
+      </select>`;
+  }
+
+  if (field.widget === 'type_select') {
+    const opts = CARD_TYPES.filter(t => t !== 'Other' && t !== 'Unknown').map(t =>
+      `<option value="${t}" ${t === val ? 'selected' : ''}>${t}</option>`
+    ).join('');
+    return `
+      <select class="select select-sm"
+        onchange="window.__ghh.setVal(${idx}, '${field.key}', this.value)">
+        ${opts}
+      </select>`;
+  }
+
+  if (field.widget === 'number') {
+    return `
+      <input type="number" class="input-number"
+        value="${val ?? (field.min || 1)}"
+        min="${field.min || 1}" max="${field.max || 7}"
+        oninput="window.__ghh.setVal(${idx}, '${field.key}', Number(this.value))" />`;
+  }
+
+  return '';
+}
+
+/**
+ * Render good hand def percentage bars inside the simulation results panel.
+ */
+function buildGoodHandDefResults(results) {
+  const pcts = results?.summary?.goodHandDefPcts;
+  const deck = null; // we only have the results here, not the deck
+
+  // Retrieve def names from the stored results snapshot
+  const defEntries = Object.entries(pcts || {});
+  if (!defEntries.length) return '';
+
+  // We need def names — they're available on the deck but not in results.
+  // The caller (renderSimResults) only has results. We'll display the IDs
+  // unless the calling code passes deck info. For now, store def names
+  // in the results object when simulating.
+  // Distinct palette so each definition gets a unique bar color
+  const DEF_PALETTE = [
+    '#60a5fa', // blue
+    '#4ade80', // green
+    '#fbbf24', // amber
+    '#c084fc', // purple
+    '#fb923c', // orange
+    '#f87171', // red
+    '#34d399', // emerald
+    '#a78bfa', // violet
+  ];
+
+  const rows = defEntries.map(([defId, pct], idx) => {
+    const name = results.goodHandDefNames?.[defId] || defId;
+    const color = DEF_PALETTE[idx % DEF_PALETTE.length];
+    return `
+      <div class="hand-chart-row">
+        <div class="hand-chart-label" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">
+          <span class="legend-dot" style="background:${color}"></span>
+          ${escapeHtml(name)}
+        </div>
+        <div class="hand-chart-bar-track">
+          <div class="hand-chart-bar" style="width:${pct}%;background:${color}"></div>
+        </div>
+        <div class="hand-chart-value">${pct}%</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="section-label" style="margin-top:20px">Good Hand Definition Results</div>
+    <div class="hand-chart">${rows}</div>`;
 }
 
 // ─── Toast Notifications ──────────────────────────────────────────────────────

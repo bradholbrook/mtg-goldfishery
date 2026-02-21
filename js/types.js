@@ -24,7 +24,8 @@
  * @property {string} format         - 'commander' for now
  * @property {Card[]} cards          - All 100 cards including commander
  * @property {string} importedAt     - ISO timestamp
- * @property {string} moxfieldUrl   - Original URL if pasted
+ * @property {string}        moxfieldUrl    - Original URL if pasted
+ * @property {GoodHandDef[]} goodHandDefs   - User-defined hand quality checks
  * // Future: strategyConfig{}, keyCards[], winConditions[], notes
  */
 
@@ -49,6 +50,24 @@
  * @property {Object} summary.typeDistribution      - % of deck by type
  * @property {number} summary.avgLandsInHand
  * // Future: avgKillTurn, commanderOnCurvePct, keyCardSeenByTurnN, etc.
+ */
+
+/**
+ * A single hand-evaluation criterion.
+ * @typedef {Object} Criterion
+ * @property {string}  type       - Registry key, e.g. 'card_in_hand' | 'at_least_type'
+ * @property {string}  [cardName] - card_in_hand: the card that must be present
+ * @property {number}  [count]    - at_least_type: minimum count required
+ * @property {string}  [cardType] - at_least_type: the CARD_TYPE to count
+ */
+
+/**
+ * A named set of criteria defining what a "good hand" looks like.
+ * A hand qualifies only when ALL criteria pass (AND logic).
+ * @typedef {Object} GoodHandDef
+ * @property {string}      id       - UUID
+ * @property {string}      name     - User label, e.g. "Keepable Ramp Hand"
+ * @property {Criterion[]} criteria
  */
 
 /**
