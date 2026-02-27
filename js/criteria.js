@@ -45,11 +45,36 @@ export const CRITERION_TYPES = {
     ],
     defaultValues: () => ({ count: 2, cardType: 'Land' }),
     evaluate(criterion, hand) {
-      const n = hand.filter(c => c.types[0] === criterion.cardType).length;
+      // Use types.includes() so MDFCs count toward any of their face types
+      const n = hand.filter(c => Array.isArray(c.types) && c.types.includes(criterion.cardType)).length;
       return n >= (Number(criterion.count) || 1);
     },
     describe(criterion) {
       return `≥${criterion.count || 1} ${criterion.cardType || 'Land'}`;
+    },
+  },
+
+  at_least_n_of_types: {
+    id:    'at_least_n_of_types',
+    label: 'At least N of any of these types',
+    fields: [
+      { key: 'count',     widget: 'number',           label: 'Count', min: 1, max: 7 },
+      { key: 'cardTypes', widget: 'types_multiselect', label: 'Types' },
+    ],
+    defaultValues: () => ({ count: 1, cardTypes: ['Creature'] }),
+    evaluate(criterion, hand) {
+      const types = Array.isArray(criterion.cardTypes) ? criterion.cardTypes : [];
+      if (!types.length) return false;
+      const n = hand.filter(c =>
+        Array.isArray(c.types) && c.types.some(t => types.includes(t))
+      ).length;
+      return n >= (Number(criterion.count) || 1);
+    },
+    describe(criterion) {
+      const types = Array.isArray(criterion.cardTypes) && criterion.cardTypes.length
+        ? criterion.cardTypes.join(' or ')
+        : '(no types)';
+      return `≥${criterion.count || 1} of: ${types}`;
     },
   },
 

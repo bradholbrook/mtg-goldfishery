@@ -14,9 +14,11 @@ import {
 } from './storage.js';
 import {
   renderDeckList, renderActiveDeck, renderSimResults, showToast,
+  setImportLoading,
 } from './ui.js';
 import { generateId } from './types.js';
 import { CRITERION_TYPES } from './criteria.js';
+import { enrichDeckWithScryfall } from './enrichment.js';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -42,7 +44,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function refresh() {
   renderDeckList(handleSelectDeck, handleDeleteDeck);
-  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation, editingDef);
+  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation, editingDef, handleReenrich);
 }
 
 // ─── Import Panel ─────────────────────────────────────────────────────────────
@@ -53,6 +55,22 @@ const MOXFIELD_URL_RE = /moxfield\.com\/decks\/([\w-]+)/i;
 // corsproxy.io proxies the request server-side and adds CORS headers for us.
 // Swap this constant if a self-hosted proxy is added later.
 const CORS_PROXY = 'https://corsproxy.io/?url=';
+
+function logEnrichedDeck(deck) {
+  const total = deck.cards.reduce((s, c) => s + c.quantity, 0);
+  console.groupCollapsed(`[goldfishery] Enriched deck: "${deck.name}" — ${deck.cards.length} unique / ${total} total`);
+  console.table(deck.cards.map(c => ({
+    name:     c.name,
+    qty:      c.quantity,
+    types:    c.types?.join(', ') ?? '—',
+    cmc:      c.cmc ?? '—',
+    tags:     c.effectTags?.map(t => t.tag).join(', ') || '',
+    enriched: c.enriched ?? false,
+  })));
+  const unenriched = deck.cards.filter(c => !c.enriched);
+  if (unenriched.length) console.warn('Failed Scryfall enrichment:', unenriched.map(c => c.name));
+  console.groupEnd();
+}
 
 function bindImportPanel() {
   const importBtn     = document.getElementById('import-btn');
@@ -97,7 +115,12 @@ function bindImportPanel() {
         if (!res.ok) throw new Error(`Moxfield returned HTTP ${res.status}`);
 
         const apiData = await res.json();
+
+        const mainboardEntries = Object.values(apiData.mainboard || {});
         const { deck, errors } = parseMoxfieldApiResponse(apiData, name);
+        const noTypeLine = mainboardEntries.filter(e => !e.card?.type_line);
+        if (noTypeLine.length) console.warn('[goldfishery] Moxfield entries with missing type_line:', noTypeLine.map(e => e.card?.name));
+        console.log(`[goldfishery] Moxfield: parsed ${deck.cards.length} unique cards (${mainboardEntries.reduce((s, e) => s + (e.quantity || 1), 0)} total)`);
 
         errors.forEach(e => showToast(e, 'warn'));
 
@@ -106,13 +129,26 @@ function bindImportPanel() {
           return;
         }
 
-        addDeck(deck);
-        activeDeckId = deck.id;
+        // Enrich with Scryfall data
+        importBtn.textContent = '⏳ Enriching…';
+        setImportLoading(true, 'Fetching card data from Scryfall…');
+        let deckToSave = deck;
+        try {
+          deckToSave = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg));
+        } catch (enrichErr) {
+          showToast(`Scryfall enrichment failed: ${enrichErr.message}`, 'warn');
+        }
+        setImportLoading(false);
+
+        logEnrichedDeck(deckToSave);
+        addDeck(deckToSave);
+        activeDeckId = deckToSave.id;
         clearImportPanel();
-        showToast(`Imported "${deck.name}" — ${deck.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
+        showToast(`Imported "${deckToSave.name}" — ${deckToSave.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
         refresh();
       } catch (err) {
         showToast(`Moxfield fetch failed: ${err.message}`, 'error');
+        setImportLoading(false);
       } finally {
         importBtn.disabled = false;
         importBtn.textContent = 'Import';
@@ -129,11 +165,32 @@ function bindImportPanel() {
         return;
       }
 
-      addDeck(deck);
-      activeDeckId = deck.id;
-      clearImportPanel();
-      showToast(`Imported "${deck.name}" — ${deck.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
-      refresh();
+      // Enrich with Scryfall data
+      importBtn.disabled = true;
+      importBtn.textContent = '⏳ Enriching…';
+      setImportLoading(true, 'Fetching card data from Scryfall…');
+      try {
+        const enriched = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg));
+        setImportLoading(false);
+
+        logEnrichedDeck(enriched);
+        addDeck(enriched);
+        activeDeckId = enriched.id;
+        clearImportPanel();
+        showToast(`Imported "${enriched.name}" — ${enriched.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
+        refresh();
+      } catch (err) {
+        // Enrichment failure: still import the deck, just without enrichment
+        setImportLoading(false);
+        addDeck(deck);
+        activeDeckId = deck.id;
+        clearImportPanel();
+        showToast(`Imported "${deck.name}" without enrichment (${err.message})`, 'warn');
+        refresh();
+      } finally {
+        importBtn.disabled = false;
+        importBtn.textContent = 'Import';
+      }
     }
   });
 }
@@ -148,7 +205,7 @@ function handleSelectDeck(deckId) {
     el.classList.toggle('deck-card--active', el.dataset.deckId === deckId);
   });
 
-  renderActiveDeck(getDeckById(deckId), handleRunSimulation, editingDef);
+  renderActiveDeck(getDeckById(deckId), handleRunSimulation, editingDef, handleReenrich);
 }
 
 function handleDeleteDeck(deckId) {
@@ -252,12 +309,53 @@ window.__ghh = {
     editingDef.criteria[idx][key] = val;
   },
 
+  /** Toggle a type in/out of a criterion's cardTypes array and re-render. */
+  toggleType(idx, typeName) {
+    if (!editingDef?.criteria[idx]) return;
+    const current = editingDef.criteria[idx].cardTypes || [];
+    editingDef.criteria[idx].cardTypes = current.includes(typeName)
+      ? current.filter(t => t !== typeName)
+      : [...current, typeName];
+    refresh();
+  },
+
   /** Update the definition name — no re-render needed */
   setName(val) {
     if (!editingDef) return;
     editingDef.name = val;
   },
 };
+
+// ─── Re-enrich ────────────────────────────────────────────────────────────────
+
+async function handleReenrich(deckId) {
+  const deck = getDeckById(deckId);
+  if (!deck) return;
+
+  const btn = document.getElementById('reenrich-btn');
+  if (btn) { btn.disabled = true; btn.textContent = '⏳ Enriching…'; }
+
+  setImportLoading(true, 'Re-fetching card data from Scryfall…');
+  try {
+    const enriched = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg));
+    setImportLoading(false);
+
+    const unknownCards = enriched.cards.filter(c => !c.enriched);
+    if (unknownCards.length) {
+      console.warn('[goldfishery] Cards still unenriched after re-enrich:', unknownCards.map(c => c.name));
+      showToast(`Re-enriched with ${unknownCards.length} card(s) still not found on Scryfall — check console for names.`, 'warn');
+    } else {
+      showToast('Re-enrichment complete — all cards updated.', 'success');
+    }
+
+    addDeck(enriched);
+    refresh();
+  } catch (err) {
+    setImportLoading(false);
+    showToast(`Re-enrichment failed: ${err.message}`, 'error');
+    if (btn) { btn.disabled = false; btn.textContent = '⟳ Re-enrich'; }
+  }
+}
 
 // ─── Simulation ───────────────────────────────────────────────────────────────
 
@@ -278,6 +376,7 @@ function handleRunSimulation(deckId, gameCount) {
         goodHandDefs.map(d => [d.id, d.name])
       );
       addResults(results);
+      refresh(); // re-renders deck panel so good hand def percentages update
       renderSimResults(results);
       showToast(`Simulated ${gameCount.toLocaleString()} games`, 'success');
     } catch (err) {

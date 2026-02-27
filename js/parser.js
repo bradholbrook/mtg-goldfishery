@@ -25,6 +25,20 @@
 import { generateId, CARD_TYPES } from './types.js';
 
 /**
+ * Returns the default set of GoodHandDefs seeded into every new deck.
+ * Users can edit or delete these like any manually created definition.
+ */
+function defaultGoodHandDefs() {
+  return [
+    {
+      id: generateId(),
+      name: '3+ Lands',
+      criteria: [{ type: 'at_least_type', count: 3, cardType: 'Land' }],
+    },
+  ];
+}
+
+/**
  * Infer a primary card type from the card name heuristically.
  * This is a very rough fallback — Scryfall will replace this in a later phase.
  * For MVP we rely on it only to give *some* type breakdown.
@@ -161,7 +175,7 @@ export function parseMoxfieldDecklist(text, deckName = 'Unnamed Deck') {
     cards,
     importedAt: new Date().toISOString(),
     moxfieldUrl: null,
-    // Future: strategyConfig, keyCards, winConditions
+    goodHandDefs: defaultGoodHandDefs(),
   };
 
   return { deck, errors };
@@ -211,7 +225,7 @@ export function parseMoxfieldApiResponse(apiData, nameOverride = '') {
       cards.push({
         name: card.name,
         quantity: quantity || 1,
-        types: [typeFromTypeLine(card.type_line)],
+        types: ['Unknown'], // Scryfall enrichment will set the real type
         isCommander: !!isCommander,
       });
     }
@@ -238,6 +252,7 @@ export function parseMoxfieldApiResponse(apiData, nameOverride = '') {
     moxfieldUrl: apiData.publicId
       ? `https://www.moxfield.com/decks/${apiData.publicId}`
       : null,
+    goodHandDefs: defaultGoodHandDefs(),
   };
 
   return { deck, errors };

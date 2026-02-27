@@ -20,6 +20,7 @@ export const TYPE_COLORS = {
   Enchantment:  '#fbbf24',
   Planeswalker: '#f87171',
   Battle:       '#fb923c',
+  MDFC:         '#818cf8',
   Other:        '#6b7280',
   Unknown:      '#6b7280',
 };
@@ -79,7 +80,7 @@ export function renderDeckList(onSelectDeck, onDeleteDeck) {
 
 // ─── Active Deck Panel ────────────────────────────────────────────────────────
 
-export function renderActiveDeck(deck, onRunSimulation, editingDef = null) {
+export function renderActiveDeck(deck, onRunSimulation, editingDef = null, onReenrich = null) {
   const container = document.getElementById('active-deck');
   if (!container) return;
 
@@ -93,11 +94,16 @@ export function renderActiveDeck(deck, onRunSimulation, editingDef = null) {
 
   const total = deck.cards.reduce((s, c) => s + c.quantity, 0);
 
-  // Build type breakdown bars
+  // Build type breakdown bars.
+  // MDFCs count toward each face type + 'MDFC' so the bar shows their dual nature.
   const typeCounts = {};
   for (const card of deck.cards) {
-    const t = card.types[0] || 'Unknown';
-    typeCounts[t] = (typeCounts[t] || 0) + card.quantity;
+    const typesToCount = card.isMDFC && Array.isArray(card.faces)
+      ? [...new Set([...card.faces.flatMap(f => f.types || []), 'MDFC'])]
+      : (card.types?.length > 0 ? [...new Set(card.types)] : ['Unknown']);
+    for (const t of typesToCount) {
+      typeCounts[t] = (typeCounts[t] || 0) + card.quantity;
+    }
   }
 
   const typeBreakdownHTML = buildTypeBreakdownBars(typeCounts, total);
@@ -113,6 +119,7 @@ export function renderActiveDeck(deck, onRunSimulation, editingDef = null) {
       <div class="deck-stats">
         <span class="stat-chip">${total} cards</span>
         <span class="stat-chip">${deck.cards.length} unique</span>
+        ${onReenrich ? `<button id="reenrich-btn" class="btn-secondary" style="font-size:11px;padding:2px 8px" title="Re-fetch card data from Scryfall">⟳ Re-enrich</button>` : ''}
       </div>
     </div>
 
@@ -146,6 +153,10 @@ export function renderActiveDeck(deck, onRunSimulation, editingDef = null) {
     const count = parseInt(document.getElementById('game-count').value, 10);
     onRunSimulation(deck.id, count);
   });
+
+  if (onReenrich) {
+    document.getElementById('reenrich-btn')?.addEventListener('click', () => onReenrich(deck.id));
+  }
 }
 
 // ─── Simulation Results ───────────────────────────────────────────────────────
@@ -154,13 +165,14 @@ export function renderSimResults(results) {
   const container = document.getElementById('sim-results-area');
   if (!container || !results) return;
 
-  const { summary, gamesSimulated, simulatedAt } = results;
+  const { summary, gamesSimulated, simulatedAt, enriched } = results;
 
   container.innerHTML = `
     <div class="results-panel section">
       <div class="section-label">
         Results — ${gamesSimulated.toLocaleString()} games
         <span class="muted" style="font-weight:400;margin-left:8px">${formatRelativeTime(simulatedAt)}</span>
+        ${enriched ? `<span class="tag tag-enriched" style="margin-left:8px;font-size:10px">Turn-by-turn</span>` : ''}
       </div>
 
       <div class="results-grid">
@@ -179,10 +191,12 @@ export function renderSimResults(results) {
         )}
       </div>
 
+      ${buildGoodHandDefResults(results)}
+
       <div class="section-label" style="margin-top:20px">Opening Hand Type Breakdown</div>
       ${buildCombinedTypeChart(summary.avgTypeCounts, summary.typeSeenPct, 7)}
 
-      ${buildGoodHandDefResults(results)}
+      ${enriched ? buildTurnByTurnPanel(summary) : ''}
     </div>
   `;
 }
@@ -241,7 +255,7 @@ function buildGoodHandsPctCard(summary) {
   // Fallback: land heuristic
   const landPct = summary.goodLandHandPct;
   const quality = landPct >= 60 ? 'good' : landPct >= 40 ? 'warn' : 'bad';
-  return buildResultCard('Good Opening Hands', `${landPct}%`, 'Hands with 3–4 lands (add definitions to customize)', quality);
+  return buildResultCard('Good Opening Hands', `${landPct}%`, 'Hands with ≥3 lands (add definitions to customize)', quality);
 }
 
 /**
@@ -309,7 +323,7 @@ function buildGoodHandSection(deck, editingDef, allResults) {
         </div>
         <div class="def-item-actions">
           ${pctBadge}
-          <button class="btn-icon" onclick="window.__ghh.editDef('${def.id}')" title="Edit">✏</button>
+          <button class="btn-icon btn-edit" onclick="window.__ghh.editDef('${def.id}')" title="Edit">✏</button>
           <button class="btn-icon btn-danger" onclick="window.__ghh.removeDef('${def.id}')" title="Remove">✕</button>
         </div>
       </div>`;
@@ -353,7 +367,7 @@ function buildGoodHandEditor(editingDef, deck) {
         <div id="criteria-list">
           ${criteriaRows}
         </div>
-        <button class="btn-secondary btn-sm" style="margin-top:6px"
+        <button class="btn-secondary btn-add btn-sm" style="margin-top:6px"
           onclick="window.__ghh.addCrit()">+ Add Criterion</button>
       </div>
       <div class="def-editor-actions">
@@ -425,7 +439,92 @@ function buildFieldWidget(field, crit, idx, deck) {
         oninput="window.__ghh.setVal(${idx}, '${field.key}', Number(this.value))" />`;
   }
 
+  if (field.widget === 'types_multiselect') {
+    const selected = Array.isArray(val) ? val : [];
+    const checkboxes = CARD_TYPES.filter(t => t !== 'Other').map(t => {
+      const checked = selected.includes(t) ? 'checked' : '';
+      return `<label class="type-checkbox-label">
+        <input type="checkbox" ${checked} onchange="window.__ghh.toggleType(${idx}, '${t}')">
+        ${t}
+      </label>`;
+    }).join('');
+    return `<div class="types-multiselect">${checkboxes}</div>`;
+  }
+
   return '';
+}
+
+/**
+ * Build the turn-by-turn stats panel (only shown for enriched decks).
+ * @param {Object} summary
+ */
+function buildTurnByTurnPanel(summary) {
+  const { avgCardsDrawnByTurn, avgEffectDrawsPerGame, pctGamesWithDrawEffect, drawEffectSourceBreakdown } = summary;
+
+  if (!avgCardsDrawnByTurn || Object.keys(avgCardsDrawnByTurn).length === 0) return '';
+
+  // Cards drawn by turn table
+  const turnEntries = Object.entries(avgCardsDrawnByTurn).sort(([a], [b]) => Number(a) - Number(b));
+  const turnRows = turnEntries.map(([turn, avg]) => `
+    <div class="hand-chart-row">
+      <div class="hand-chart-label">Turn ${turn}</div>
+      <div class="hand-chart-bar-track">
+        <div class="hand-chart-bar" style="width:${Math.min((avg / 30) * 100, 100)}%;background:#60a5fa"></div>
+      </div>
+      <div class="hand-chart-value">${avg.toFixed(1)}</div>
+    </div>`).join('');
+
+  // Draw engine source breakdown
+  const sourceEntries = Object.entries(drawEffectSourceBreakdown || {})
+    .sort(([, a], [, b]) => b - a);
+
+  const sourceRows = sourceEntries.map(([name, avg], idx) => {
+    const colors = ['#4ade80', '#fbbf24', '#c084fc', '#fb923c', '#f87171', '#34d399'];
+    const color = colors[idx % colors.length];
+    return `
+      <div class="hand-chart-row">
+        <div class="hand-chart-label" style="max-width:180px;overflow:hidden;text-overflow:ellipsis">
+          <span class="legend-dot" style="background:${color}"></span>
+          ${escapeHtml(name)}
+        </div>
+        <div class="hand-chart-bar-track">
+          <div class="hand-chart-bar" style="width:${Math.min(avg * 20, 100)}%;background:${color}"></div>
+        </div>
+        <div class="hand-chart-value">${avg.toFixed(1)}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="section-label" style="margin-top:20px">Cumulative Cards Drawn by Turn</div>
+    <div class="hand-chart">
+      <div class="hand-chart-row hand-chart-header">
+        <div class="hand-chart-label"></div>
+        <div class="hand-chart-bar-track"></div>
+        <div class="hand-chart-value muted" style="font-size:10px">Avg</div>
+      </div>
+      ${turnRows}
+    </div>
+
+    <div class="results-grid" style="margin-top:16px">
+      ${buildResultCard(
+        'Avg Effect Draws/Game',
+        (avgEffectDrawsPerGame ?? 0).toFixed(1),
+        'Cards from ETB/upkeep effects',
+        null
+      )}
+      ${buildResultCard(
+        'Games with Draw Engine',
+        `${pctGamesWithDrawEffect ?? 0}%`,
+        'Had ≥1 draw source on board',
+        null
+      )}
+    </div>
+
+    ${sourceEntries.length > 0 ? `
+      <div class="section-label" style="margin-top:16px">Draw Effect Sources (avg draws/game)</div>
+      <div class="hand-chart">${sourceRows}</div>
+    ` : ''}
+  `;
 }
 
 /**
@@ -471,9 +570,46 @@ function buildGoodHandDefResults(results) {
       </div>`;
   }).join('');
 
+  const anyPct = results?.summary?.goodHandAnyPct;
+  const totalRow = anyPct !== null && anyPct !== undefined ? `
+      <div class="hand-chart-row" style="border-top:1px solid var(--border);margin-top:6px;padding-top:6px">
+        <div class="hand-chart-label" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;font-weight:600">
+          <span class="legend-dot" style="background:#94a3b8"></span>
+          Any Definition
+        </div>
+        <div class="hand-chart-bar-track">
+          <div class="hand-chart-bar" style="width:${anyPct}%;background:#94a3b8"></div>
+        </div>
+        <div class="hand-chart-value" style="font-weight:600">${anyPct}%</div>
+      </div>` : '';
+
   return `
     <div class="section-label" style="margin-top:20px">Good Hand Definition Results</div>
-    <div class="hand-chart">${rows}</div>`;
+    <div class="hand-chart">${rows}${totalRow}</div>`;
+}
+
+// ─── Import Loading State ─────────────────────────────────────────────────────
+
+/**
+ * Show or hide a loading indicator in the sidebar during Scryfall enrichment.
+ * The message replaces the deck list while loading.
+ *
+ * @param {boolean} loading
+ * @param {string}  [message]
+ */
+export function setImportLoading(loading, message = 'Loading…') {
+  const deckList = document.getElementById('deck-list');
+  if (!deckList) return;
+
+  if (loading) {
+    deckList.innerHTML = `
+      <div class="loading-state">
+        <div class="loading-spinner"></div>
+        <div class="loading-msg muted">${escapeHtml(message)}</div>
+      </div>`;
+  } else {
+    // Will be overwritten by the next renderDeckList() call; no action needed
+  }
 }
 
 // ─── Toast Notifications ──────────────────────────────────────────────────────

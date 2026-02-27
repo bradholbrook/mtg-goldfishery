@@ -8,25 +8,111 @@
 /**
  * A single card in the deck.
  * @typedef {Object} Card
- * @property {string} name
- * @property {number} quantity
- * @property {string[]} types        - ['Creature'], ['Instant'], ['Land'], etc.
- * @property {boolean} isCommander
- * // Future: manaCost, cmc, tags[], oracleText, scryfallId, priority, isKeyCard
+ * @property {string}       name
+ * @property {number}       quantity
+ * @property {string[]}     types          - All face types combined; MDFCs include 'MDFC'
+ * @property {boolean}      isCommander
+ * @property {string|null}  oracleText     - Front face oracle text from Scryfall
+ * @property {number|null}  cmc            - Front (spell) face CMC; use for casting cost
+ * @property {string|null}  manaCost       - e.g. "{2}{B}{B}"
+ * @property {string[]|null} keywords      - e.g. ["Flying", "Deathtouch"]
+ * @property {string[]|null} producedMana  - e.g. ["B", "G"]
+ * @property {string|null}  scryfallId     - UUID from Scryfall
+ * @property {boolean}      enriched       - true after Scryfall enrichment
+ * @property {EffectTag[]}  effectTags     - Detected/user-overridden effect tags (all faces merged)
+ * @property {boolean}      [isMDFC]       - true for modal double-faced cards
+ * @property {CardFace[]|null} [faces]     - Per-face data for MDFCs; null for single-faced cards
+ */
+
+/**
+ * A structured description of one effect on a card.
+ * Built by detectEffectTags() at enrichment time, never recomputed at sim time.
+ *
+ * @typedef {Object} EffectTag
+ * @property {'draw'|'ramp'|'tutor'|'removal'|'token'|'other'} category
+ * @property {string}   subtype        - e.g. 'draw_n', 'loot', 'land_fetch', 'add_mana_tap'
+ * @property {'etb'|'cast'|'upkeep'|'tap'|'draw_step'|'death'|'passive'} timing
+ * @property {number|null} value       - cards drawn, mana added, etc. null for scaling effects
+ * @property {boolean}  isConditional
+ * @property {string|null} condition   - human-readable condition description
+ * @property {string|null} [counterType] - for draw_scaling_tap: counter name (e.g. 'burden')
+ * @property {'simulatable'|'simulatable_soon'|'track_only'|'skip'} tier
+ * @property {'auto'|'user'} source    - 'user' overrides survive re-enrichment
+ */
+
+/**
+ * One face of a Modal Double-Faced Card (MDFC).
+ * Each face can be played independently — the player chooses at cast time.
+ * @typedef {Object} CardFace
+ * @property {string}      name
+ * @property {string[]}    types       - e.g. ['Sorcery'] or ['Land']
+ * @property {string|null} oracleText
+ * @property {number|null} cmc
+ * @property {string|null} manaCost
+ * @property {EffectTag[]} effectTags
+ */
+
+/**
+ * A card on the battlefield with its current state.
+ * @typedef {Object} BattlefieldCard
+ * @property {Card}    card
+ * @property {boolean} tapped
+ * @property {number}  turnEntered
+ * @property {Object}  counters       - per-card counter tracking, e.g. { burden: 2 }
+ */
+
+/**
+ * Full game state for one simulated game.
+ * @typedef {Object} GameState
+ * @property {Card[]}            library            - top = index 0
+ * @property {Card[]}            hand
+ * @property {BattlefieldCard[]} battlefield
+ * @property {Card[]}            graveyard
+ * @property {Card[]}            commandZone
+ * @property {number}            turn
+ * @property {boolean}           landPlayedThisTurn
+ * @property {number}            landDropsAvailable
+ * @property {number}            manaAvailable      - total CMC-level mana (Phase 1)
+ * @property {number}            commanderCastCount
+ * @property {TurnRecord}        currentTurnRecord
+ * @property {TurnRecord[]}      turnHistory
+ * @property {boolean}           deckedOut
+ */
+
+/**
+ * Log of events in a single turn.
+ * @typedef {Object} TurnRecord
+ * @property {number}   turn
+ * @property {Card[]}   cardsDrawn
+ * @property {Card[]}   landsPlayed
+ * @property {Card[]}   spellsCast
+ * @property {number}   manaSpent
+ * @property {string[]} effectsFired   - e.g. ['Phyrexian Arena:upkeep:draw']
+ */
+
+/**
+ * User-configured simulation strategy.
+ * @typedef {Object} StrategyConfig
+ * @property {string[]} castPriority        - ordered category list, highest priority first
+ * @property {'any'|'basic_first'|'dual_first'} landPriority
+ * @property {number}   maxTurns            - default: 10
+ * @property {boolean}  preferLowCMC        - tiebreaker within same priority category
+ * @property {boolean}  castCommanderWhenAble
  */
 
 /**
  * The full deck configuration — this is what gets saved/loaded as JSON.
  * @typedef {Object} DeckConfig
- * @property {string} id             - UUID, generated on import
- * @property {string} name           - Deck name from Moxfield or user-set
- * @property {string} commander      - Commander card name
- * @property {string} format         - 'commander' for now
- * @property {Card[]} cards          - All 100 cards including commander
- * @property {string} importedAt     - ISO timestamp
- * @property {string}        moxfieldUrl    - Original URL if pasted
- * @property {GoodHandDef[]} goodHandDefs   - User-defined hand quality checks
- * // Future: strategyConfig{}, keyCards[], winConditions[], notes
+ * @property {string}         id              - UUID, generated on import
+ * @property {string}         name            - Deck name from Moxfield or user-set
+ * @property {string}         commander       - Commander card name
+ * @property {string}         format          - 'commander' for now
+ * @property {Card[]}         cards           - All 100 cards including commander
+ * @property {string}         importedAt      - ISO timestamp
+ * @property {string}         moxfieldUrl     - Original URL if pasted
+ * @property {boolean}        enriched        - true if cards have Scryfall data
+ * @property {GoodHandDef[]}  goodHandDefs    - User-defined hand quality checks
+ * @property {StrategyConfig} strategyConfig  - Simulation strategy (merged with defaults)
  */
 
 /**
@@ -43,13 +129,17 @@
  * @typedef {Object} SimulationResults
  * @property {string} deckId
  * @property {number} gamesSimulated
- * @property {string} simulatedAt   - ISO timestamp
+ * @property {string} simulatedAt    - ISO timestamp
  * @property {OpeningHandResult[]} hands  - Raw hand data for each game
- * @property {Object} summary        - Computed aggregate stats
- * @property {Object} summary.avgTypeCountsInHand   - { Land: 2.8, Creature: 2.1, ... }
- * @property {Object} summary.typeDistribution      - % of deck by type
- * @property {number} summary.avgLandsInHand
- * // Future: avgKillTurn, commanderOnCurvePct, keyCardSeenByTurnN, etc.
+ * @property {Object} summary         - Computed aggregate stats
+ * @property {Object} summary.avgTypeCounts          - { Land: 2.8, Creature: 2.1, ... }
+ * @property {Object} summary.typeSeenPct            - % of hands containing each type
+ * @property {number} summary.goodLandHandPct        - % hands with 3-4 lands
+ * @property {Object} summary.deckTypeDistribution   - % of deck by type
+ * @property {Object} [summary.avgCardsDrawnByTurn]  - cumulative cards drawn by turn N
+ * @property {number} [summary.avgEffectDrawsPerGame] - avg effect-triggered draws per game
+ * @property {number} [summary.pctGamesWithDrawEffect] - % games with draw engine in play
+ * @property {Object} [summary.drawEffectSourceBreakdown] - avg draws per card per game
  */
 
 /**
@@ -80,7 +170,16 @@
  * // Future: userPreferences{}, sharedProfiles[]
  */
 
-export const CURRENT_SAVE_VERSION = "1.0";
+export const CURRENT_SAVE_VERSION = "2.0";
+
+/** Default StrategyConfig — merged with any deck-level config before simulating. */
+export const DEFAULT_STRATEGY_CONFIG = {
+  castPriority: ['ramp', 'draw', 'tutor', 'creature', 'enchantment', 'artifact', 'sorcery', 'instant', 'other'],
+  landPriority: 'any',
+  maxTurns: 10,
+  preferLowCMC: true,
+  castCommanderWhenAble: false,
+};
 
 /** Card types we recognize and display (order matters for UI) */
 export const CARD_TYPES = [
@@ -92,6 +191,7 @@ export const CARD_TYPES = [
   'Enchantment',
   'Planeswalker',
   'Battle',
+  'MDFC',
   'Other'
 ];
 

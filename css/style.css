@@ -520,6 +520,13 @@ textarea.input-text {
 
 .btn-secondary:hover { border-color: var(--border-bright); color: var(--text-primary); }
 
+.btn-add {
+  background: rgba(52, 211, 153, 0.08);
+  color: #34d399;
+  border: 1px solid rgba(52, 211, 153, 0.3);
+}
+.btn-add:hover { background: rgba(52, 211, 153, 0.14); border-color: rgba(52, 211, 153, 0.55); color: #6ee7b7; }
+
 .btn-icon {
   background: none;
   border: none;
@@ -532,6 +539,9 @@ textarea.input-text {
 }
 
 .btn-icon:hover { color: var(--text-secondary); background: var(--bg-4); }
+.btn-edit { color: #f59e0b; }
+.btn-edit:hover { color: #fbbf24; background: rgba(245, 158, 11, 0.1); }
+.btn-danger { color: var(--red); }
 .btn-danger:hover { color: var(--red); background: var(--red-dim); }
 
 /* ─── Form Controls ─────────────────────────────────────────── */
@@ -572,6 +582,12 @@ textarea.input-text {
   border-color: var(--accent-dim);
   color: var(--accent);
   background: var(--accent-glow);
+}
+
+.tag-enriched {
+  border-color: #4ade8040;
+  color: #4ade80;
+  background: #4ade8012;
 }
 
 .stat-chip {
@@ -768,8 +784,62 @@ textarea.input-text {
 
 .input-number:focus { outline: none; border-color: var(--accent-dim); }
 
+.types-multiselect {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  align-items: center;
+  padding: 6px 8px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+
+.type-checkbox-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  cursor: pointer;
+  white-space: nowrap;
+  color: var(--text-primary);
+}
+
+.type-checkbox-label input[type="checkbox"] {
+  accent-color: var(--accent);
+  cursor: pointer;
+  margin: 0;
+}
+
 .btn-sm {
   font-size: 11px;
   padding: 5px 12px;
 }
 ::-webkit-scrollbar-thumb:hover { background: var(--border-bright); }
+
+/* ─── Import Loading State ───────────────────────────────────── */
+.loading-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  padding: 24px 16px;
+}
+
+.loading-msg {
+  font-size: 11px;
+  text-align: center;
+}
+
+.loading-spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid var(--border);
+  border-top-color: var(--accent);
+  border-radius: 50%;
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
+}
