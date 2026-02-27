@@ -71,8 +71,6 @@ User pastes URL or decklist
 
 **CRITERION_TYPES registry** (`criteria.js`): Add one entry → UI, evaluation, and save/load all work automatically. Replicate for any new extensible feature type.
 
-**User override precedence:** `effectTags[].source = 'user'` survives re-enrichment. Card-level overrides live in `card.userOverrides` — Scryfall data is never mutated in place.
-
 **Pre-computed tags:** `effects.js` runs at import time. Simulation reads `card.effectTags[]`, never oracle text.
 
 **Effect tiers:** `simulatable` (fires in sim) | `simulatable_soon` (planned) | `track_only` (stats only) | `skip`.
@@ -89,19 +87,12 @@ Card {
   oracleText,       // front face oracle text
   cmc,              // spell-face CMC (for MDFCs: front/non-land face)
   manaCost, keywords, producedMana, scryfallId, enriched,
-  effectTags[],     // merged from all faces; source:'user' survives re-enrichment
+  effectTags[],     // merged from all faces; source:'auto'|'user'
   // MDFC fields (layout === 'modal_dfc'):
   isMDFC,           // true for modal double-faced cards
   faces: [{         // per-face data; null for single-faced cards
     name, types, oracleText, cmc, manaCost, effectTags
   }],
-  // User overrides (persist in save file, survive re-enrichment):
-  userOverrides: {
-    types: null,    // string[] — overrides card.types in sim + display
-    cmc:   null,    // number
-    manaCost: null,
-    tags:  [],      // string[] — custom labels: ['combo piece', 'wincon']
-  }
 }
 ```
 

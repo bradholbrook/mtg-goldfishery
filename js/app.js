@@ -13,12 +13,13 @@ import {
   updateDeckGoodHandDefs, removeGoodHandDef,
 } from './storage.js';
 import {
-  renderDeckList, renderActiveDeck, renderSimResults, showToast,
+  renderDeckList, renderActiveDeck, showToast,
   setImportLoading,
 } from './ui.js';
 import { generateId } from './types.js';
 import { CRITERION_TYPES } from './criteria.js';
 import { enrichDeckWithScryfall } from './enrichment.js';
+import { EFFECT_TYPES, EFFECT_TYPE_OPTIONS } from './effect-types.js';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -32,6 +33,18 @@ let activeDeckId = null;
  */
 let editingDef = null;
 
+let activeTab = 'overview';
+
+/** Card names currently expanded in the Cards tab effect editor. */
+const expandedEffectCards = new Set();
+
+/** Type names currently expanded in the Overview tab type list. */
+const expandedTypeGroups = new Set();
+
+/** Persistent simulate tab settings — survive re-renders. */
+let simGameCount = 1000;
+let simMaxTurns = 10;
+
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -44,7 +57,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function refresh() {
   renderDeckList(handleSelectDeck, handleDeleteDeck);
-  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation, editingDef, handleReenrich);
+  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation, editingDef, activeTab, expandedEffectCards, expandedTypeGroups, simGameCount, simMaxTurns);
 }
 
 // ─── Import Panel ─────────────────────────────────────────────────────────────
@@ -199,13 +212,14 @@ function bindImportPanel() {
 
 function handleSelectDeck(deckId) {
   activeDeckId = deckId;
-  editingDef = null; // clear any in-progress edit when switching decks
+  editingDef = null;
+  activeTab = 'overview';
 
   document.querySelectorAll('.deck-card').forEach(el => {
     el.classList.toggle('deck-card--active', el.dataset.deckId === deckId);
   });
 
-  renderActiveDeck(getDeckById(deckId), handleRunSimulation, editingDef, handleReenrich);
+  refresh();
 }
 
 function handleDeleteDeck(deckId) {
@@ -326,42 +340,212 @@ window.__ghh = {
   },
 };
 
-// ─── Re-enrich ────────────────────────────────────────────────────────────────
+// ─── Effect Tag Editor Actions ────────────────────────────────────────────────
+//
+// Exposed on window.__eff so onclick= attributes in effect editor templates can
+// reach them without circular imports. All mutating actions call refresh().
 
-async function handleReenrich(deckId) {
-  const deck = getDeckById(deckId);
-  if (!deck) return;
+/** Find the card object in the active deck by name. */
+function getCardByName(cardName) {
+  const deck = getDeckById(activeDeckId);
+  return deck?.cards.find(c => c.name === cardName) ?? null;
+}
 
-  const btn = document.getElementById('reenrich-btn');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Enriching…'; }
+window.__eff = {
 
-  setImportLoading(true, 'Re-fetching card data from Scryfall…');
-  try {
-    const enriched = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg));
-    setImportLoading(false);
+  /** Toggle the effect editor open/closed for a card row. Only one open at a time. */
+  toggle(cardName) {
+    const wasOpen = expandedEffectCards.has(cardName);
+    expandedEffectCards.clear();
+    if (!wasOpen) expandedEffectCards.add(cardName);
+    refresh();
+  },
 
-    const unknownCards = enriched.cards.filter(c => !c.enriched);
-    if (unknownCards.length) {
-      console.warn('[goldfishery] Cards still unenriched after re-enrich:', unknownCards.map(c => c.name));
-      showToast(`Re-enriched with ${unknownCards.length} card(s) still not found on Scryfall — check console for names.`, 'warn');
-    } else {
-      showToast('Re-enrichment complete — all cards updated.', 'success');
+  /**
+   * Create a user override for an auto-detected tag.
+   * The override inherits the auto tag's detected values as a starting point.
+   * In the simulator, the auto tag is skipped when a user tag exists for the
+   * same (subtype, timing) pair.
+   */
+  override(cardName, subtype, timing) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    const autoTag = card.effectTags.find(
+      t => t.source === 'auto' && t.subtype === subtype && t.timing === timing
+    );
+    if (!autoTag) return;
+    // Guard: don't create a duplicate override
+    const alreadyOverridden = card.effectTags.some(
+      t => t.source === 'user' && t.subtype === subtype && t.timing === timing
+    );
+    if (alreadyOverridden) return;
+
+    const typeInfo = EFFECT_TYPES[subtype];
+    card.effectTags.push({
+      category:      autoTag.category,
+      subtype:       autoTag.subtype,
+      timing:        autoTag.timing,
+      condition:     autoTag.condition ?? null,
+      expectedValue: null,
+      tier:          autoTag.tier,
+      source:        'user',
+      ...(typeInfo?.defaultValues() ?? {}),
+      // Inherit the auto-detected value so the override starts accurate
+      value:         autoTag.value,
+      isConditional: autoTag.isConditional ?? false,
+    });
+    refresh();
+  },
+
+  /**
+   * Add a new user effect tag. Picks the first (subtype, timing) pair not
+   * already covered by an auto-detected tag so there's no immediate conflict.
+   */
+  add(cardName) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    card.effectTags = card.effectTags || [];
+
+    // Each card gets at most one tag per subtype — hide the entire subtype if any
+    // tag (auto or user) already uses it.
+    const coveredSubtypes = new Set(card.effectTags.map(t => t.subtype));
+    const chosenType = EFFECT_TYPE_OPTIONS.find(et => !coveredSubtypes.has(et.id));
+
+    if (!chosenType) {
+      showToast('Every effect type is already on this card. Use Override to customise auto-detected ones.', 'warn');
+      return;
     }
 
-    addDeck(enriched);
+    const chosenTiming = chosenType.validTimings[0];
+
+    card.effectTags.push({
+      category:      chosenType.category,
+      subtype:       chosenType.id,
+      timing:        chosenTiming,
+      condition:     null,
+      expectedValue: null,
+      tier:          chosenType.defaultTier,
+      source:        'user',
+      ...chosenType.defaultValues(),
+    });
     refresh();
-  } catch (err) {
-    setImportLoading(false);
-    showToast(`Re-enrichment failed: ${err.message}`, 'error');
-    if (btn) { btn.disabled = false; btn.textContent = '⟳ Re-enrich'; }
-  }
-}
+  },
+
+  /** Remove a user tag by its index in card.effectTags. */
+  remove(cardName, tagIdx) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    const tag = card.effectTags[tagIdx];
+    if (!tag || tag.source !== 'user') return;
+    card.effectTags.splice(tagIdx, 1);
+    refresh();
+  },
+
+  /** Update a single field on a user tag. Re-renders only when needed. */
+  setField(cardName, tagIdx, fieldKey, value) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    const tag = card.effectTags[tagIdx];
+    if (!tag || tag.source !== 'user') return;
+    tag[fieldKey] = value;
+    // isConditional changes affect which fields are shown — need re-render
+    if (fieldKey === 'isConditional') refresh();
+  },
+
+  /**
+   * Change the subtype of a user addition tag.
+   * Picks the first uncovered timing for the new subtype.
+   * Only applies to addition tags (not overrides — their subtype is fixed).
+   */
+  setSubtype(cardName, tagIdx, subtypeId) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    const tag = card.effectTags[tagIdx];
+    if (!tag || tag.source !== 'user') return;
+
+    const typeInfo = EFFECT_TYPES[subtypeId];
+    if (!typeInfo) return;
+
+    // Block if any tag (auto or user) already uses this subtype — one per card.
+    const coveredSubtypes = new Set(
+      card.effectTags.filter((_, i) => i !== tagIdx).map(t => t.subtype)
+    );
+    if (coveredSubtypes.has(subtypeId)) return; // UI should already prevent this
+
+    const availableTiming = typeInfo.validTimings[0];
+
+    card.effectTags[tagIdx] = {
+      category:      typeInfo.category,
+      subtype:       subtypeId,
+      timing:        availableTiming,
+      isConditional: false,
+      condition:     null,
+      expectedValue: null,
+      tier:          typeInfo.defaultTier,
+      source:        'user',
+      ...typeInfo.defaultValues(),
+    };
+    refresh();
+  },
+
+  /** Change the timing of a user addition tag. */
+  setTiming(cardName, tagIdx, timing) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    const tag = card.effectTags[tagIdx];
+    if (!tag || tag.source !== 'user') return;
+    tag.timing = timing;
+    // Timing change doesn't alter which fields are shown — no re-render
+  },
+
+  /** Toggle tier for a conditional user tag. Re-renders to show/hide EV input. */
+  setTier(cardName, tagIdx, tier) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    const tag = card.effectTags[tagIdx];
+    if (!tag || tag.source !== 'user') return;
+    tag.tier = tier;
+    refresh();
+  },
+
+};
+
+// ─── Tab Navigation ───────────────────────────────────────────────────────────
+
+window.__tab = function(tab) {
+  activeTab = tab;
+  editingDef = null;
+  refresh();
+};
+
+// ─── Overview Type Group Toggle ───────────────────────────────────────────────
+
+// ─── Simulate Tab Settings ────────────────────────────────────────────────────
+
+window.__sim = {
+  setGameCount(v) { simGameCount = parseInt(v, 10); },
+  setMaxTurns(v)  { simMaxTurns  = parseInt(v, 10); },
+};
+
+window.__ovr = {
+  toggle(type) {
+    if (expandedTypeGroups.has(type)) {
+      expandedTypeGroups.delete(type);
+    } else {
+      expandedTypeGroups.add(type);
+    }
+    refresh();
+  },
+};
 
 // ─── Simulation ───────────────────────────────────────────────────────────────
 
-function handleRunSimulation(deckId, gameCount) {
+function handleRunSimulation(deckId) {
   const deck = getDeckById(deckId);
   if (!deck) return;
+
+  const gameCount = simGameCount;
+  const maxTurns  = simMaxTurns;
 
   const btn = document.getElementById('run-sim-btn');
   if (btn) { btn.disabled = true; btn.textContent = '⏳ Simulating…'; }
@@ -370,19 +554,19 @@ function handleRunSimulation(deckId, gameCount) {
   setTimeout(() => {
     try {
       const goodHandDefs = deck.goodHandDefs || [];
-      const results = runSimulation(deck, gameCount, goodHandDefs);
-      // Store def names alongside pcts so results panel can display them
+      const deckWithTurns = { ...deck, strategyConfig: { ...(deck.strategyConfig || {}), maxTurns } };
+      const results = runSimulation(deckWithTurns, gameCount, goodHandDefs);
       results.goodHandDefNames = Object.fromEntries(
         goodHandDefs.map(d => [d.id, d.name])
       );
       addResults(results);
-      refresh(); // re-renders deck panel so good hand def percentages update
-      renderSimResults(results);
+      activeTab = 'results';
+      refresh();
       showToast(`Simulated ${gameCount.toLocaleString()} games`, 'success');
     } catch (err) {
       showToast(`Simulation error: ${err.message}`, 'error');
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '▶ Run Simulation'; }
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Goldfish'; }
     }
   }, 20);
 }

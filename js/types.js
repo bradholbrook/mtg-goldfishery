@@ -35,9 +35,10 @@
  * @property {number|null} value       - cards drawn, mana added, etc. null for scaling effects
  * @property {boolean}  isConditional
  * @property {string|null} condition   - human-readable condition description
- * @property {string|null} [counterType] - for draw_scaling_tap: counter name (e.g. 'burden')
+ * @property {string|null} [counterType]    - for draw_scaling_tap: counter name (e.g. 'burden')
+ * @property {number|null} [expectedValue]  - User override: expected sim value for conditional effects (e.g. 2.0 expected draws)
  * @property {'simulatable'|'simulatable_soon'|'track_only'|'skip'} tier
- * @property {'auto'|'user'} source    - 'user' overrides survive re-enrichment
+ * @property {'auto'|'user'} source    - 'auto' = detected by enrichment; 'user' = added via the effect editor
  */
 
 /**

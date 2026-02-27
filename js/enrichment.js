@@ -363,16 +363,10 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
     const fields = enrichmentMap.get(card.name);
     if (!fields) return { ...card, effectTags: [], enriched: false };
 
-    // User-overridden tags (source: 'user') are preserved over auto-detected ones
-    const existingUserTags = (card.effectTags || []).filter(t => t.source === 'user');
-    const autoTags = fields.effectTags.filter(t => t.source !== 'user');
-
     return {
       ...card,
       ...fields,
-      // User override > Scryfall-derived > original parsed type
-      types: card.userOverrides?.types ?? fields.types ?? card.types,
-      effectTags: [...autoTags, ...existingUserTags],
+      types: fields.types ?? card.types,
     };
   });
 
@@ -381,6 +375,6 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
   return {
     ...deck,
     cards: enrichedCards,
-    enriched: true,   // Deck-level flag: save/load can skip re-enrichment
+    enriched: true,
   };
 }

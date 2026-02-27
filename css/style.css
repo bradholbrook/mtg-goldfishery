@@ -25,9 +25,9 @@
   --text-muted: #545d73;
 
   /* Accent — mana gold */
-  --accent: #c8a45a;
-  --accent-dim: #7a6234;
-  --accent-glow: rgba(200, 164, 90, 0.15);
+  --accent: #f0b429;
+  --accent-dim: #2d1f00;
+  --accent-glow: rgba(240, 180, 41, 0.14);
 
   /* Status colors */
   --green: #4ade80;
@@ -43,7 +43,7 @@
   --font-mono: 'JetBrains Mono', monospace;
 
   /* Layout */
-  --sidebar-width: 280px;
+  --sidebar-width: 220px;
   --radius: 6px;
   --radius-lg: 10px;
 }
@@ -93,14 +93,15 @@ body {
   font-family: var(--font-display);
   font-weight: 800;
   font-size: 16px;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
   color: var(--accent);
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
 }
 
-.app-logo .logo-icon { font-size: 20px; }
+.app-logo .logo-icon { font-size: 28px; }
 
 .app-logo .logo-sub {
   font-weight: 400;
@@ -197,7 +198,7 @@ body {
 
 textarea.input-text {
   resize: vertical;
-  min-height: 120px;
+  min-height: 100px;
   line-height: 1.5;
 }
 
@@ -319,6 +320,48 @@ textarea.input-text {
   flex: 1;
   height: 1px;
   background: var(--border);
+}
+
+/* ─── Overview Type Group List ──────────────────────────────── */
+.type-group-list { display: flex; flex-direction: column; gap: 2px; }
+
+.type-group-item {}
+
+.type-group-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s;
+}
+.type-group-header:hover { background: var(--bg-2); }
+
+.type-group-name { font-size: 13px; font-weight: 600; color: var(--text-primary); flex: 1; }
+.type-group-count { font-size: 12px; margin-left: auto; }
+.type-group-chevron { font-size: 9px; color: var(--text-muted); width: 14px; text-align: center; flex-shrink: 0; }
+
+.type-group-cards {
+  display: flex;
+  flex-direction: column;
+  padding: 2px 8px 6px 24px;
+  gap: 1px;
+}
+
+.type-group-card-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--text-primary);
+  padding: 3px 0;
+}
+.type-group-card-cmc {
+  margin-left: auto;
+  font-size: 11px;
+  flex-shrink: 0;
 }
 
 /* ─── Type Breakdown Bars ───────────────────────────────────── */
@@ -842,4 +885,164 @@ textarea.input-text {
 
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* ─── Tab Bar ───────────────────────────────────────────────── */
+.tab-bar {
+  display: flex;
+  gap: 0;
+  margin-bottom: 24px;
+  border-bottom: 1px solid var(--border);
+}
+.tab-btn {
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  padding: 8px 16px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s;
+  margin-bottom: -1px;
+}
+.tab-btn:hover { color: var(--text-secondary); }
+.tab-btn--active { color: var(--accent); border-bottom-color: var(--accent); }
+
+/* ─── Effect Chips (Cards tab) ──────────────────────────────── */
+.effect-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border-radius: 3px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 500;
+  border: 1px solid;
+  white-space: nowrap;
+}
+.effect-chip--simulatable { color: var(--green);  border-color: var(--green-dim);  background: rgba(74,222,128,0.08); }
+.effect-chip--track_only  { color: var(--yellow); border-color: var(--yellow-dim); background: rgba(251,191,36,0.08); }
+.effect-chip--skip        { color: var(--text-muted); border-color: var(--border); background: transparent; }
+
+/* ─── Card List Rows (Cards tab) ────────────────────────────── */
+.card-list { display: flex; flex-direction: column; gap: 2px; }
+.card-list-group-label {
+  font-size: 10px; font-weight: 700; letter-spacing: 0.1em;
+  text-transform: uppercase; color: var(--text-muted);
+  padding: 10px 0 4px; border-bottom: 1px solid var(--border);
+  margin-bottom: 2px;
+}
+.card-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 6px 8px; border-radius: var(--radius);
+  transition: background 0.1s;
+}
+.card-row:hover { background: var(--bg-2); }
+.card-row-name { flex: 1; font-size: 12px; color: var(--text-primary); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.card-row-qty  { font-size: 11px; color: var(--text-muted); width: 24px; text-align: right; flex-shrink: 0; }
+.card-row-cmc  { font-size: 11px; color: var(--text-muted); width: 36px; text-align: center; flex-shrink: 0; }
+.card-row-tags { display: flex; flex-wrap: wrap; gap: 4px; flex-shrink: 0; }
+
+.card-row-wrapper { display: flex; flex-direction: column; }
+.card-row--clickable { cursor: pointer; user-select: none; }
+.card-row-chevron { font-size: 9px; color: var(--text-muted); flex-shrink: 0; width: 14px; text-align: center; }
+
+/* ─── Effect Chip Variants ──────────────────────────────────────────────────── */
+.effect-chip--simulatable_soon { color: #60a5fa; border-color: rgba(96,165,250,0.3); background: rgba(96,165,250,0.08); }
+.effect-chip--user { outline: 1px solid currentColor; outline-offset: 1px; }
+
+/* ─── Card Effect Editor ────────────────────────────────────────────────────── */
+.card-effect-editor {
+  background: var(--bg-2);
+  border: 1px solid var(--border-bright);
+  border-top: none;
+  border-radius: 0 0 var(--radius) var(--radius);
+  padding: 10px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.card-effect-section { display: flex; flex-direction: column; gap: 6px; }
+
+.card-effect-section-label {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+}
+
+.card-effect-auto-tags { display: flex; flex-direction: column; gap: 4px; }
+
+.effect-auto-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.btn-effect-override {
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 500;
+  padding: 2px 7px;
+  cursor: pointer;
+  letter-spacing: 0.04em;
+  transition: color 0.15s, border-color 0.15s;
+}
+.btn-effect-override:hover { color: var(--accent); border-color: var(--accent-dim); }
+
+.effect-override-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  font-style: italic;
+}
+
+.effect-tag-row--override {
+  border-color: var(--accent-dim);
+  background: var(--accent-glow);
+}
+
+.effect-tag-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+}
+.effect-tag-row-fields {
+  flex: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.effect-tag-remove { flex-shrink: 0; }
+
+.card-effect-editor-footer {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
+  border-top: 1px solid var(--border);
+}
+
+.effect-field-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
 }

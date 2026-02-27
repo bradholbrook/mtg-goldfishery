@@ -224,7 +224,18 @@ function resolveDrawEffects(gs, timing, subset = null) {
       if (tag.category !== 'draw') continue;
       if (tag.timing !== timing) continue;
 
-      const drawCount = tag.value ?? 1;
+      // Skip auto tag if user has overridden the same (subtype, timing) pair
+      if (tag.source === 'auto') {
+        const hasUserOverride = card.effectTags.some(
+          t => t.source === 'user' && t.subtype === tag.subtype && t.timing === tag.timing
+        );
+        if (hasUserOverride) continue;
+      }
+
+      // User tags with expectedValue drive simulation for conditional effects
+      const drawCount = (tag.source === 'user' && tag.expectedValue != null)
+        ? Math.floor(tag.expectedValue)
+        : (tag.value ?? 1);
       for (let d = 0; d < drawCount; d++) {
         if (gs.library.length === 0) { gs.deckedOut = true; return; }
         const drawn = gs.library.shift();
@@ -263,6 +274,14 @@ function resolveTapDraws(gs) {
       if (tag.tier !== 'simulatable') continue;
       if (tag.timing !== 'tap') continue;
 
+      // Skip auto tag if user has overridden the same (subtype, timing) pair
+      if (tag.source === 'auto') {
+        const hasUserOverride = bf.card.effectTags.some(
+          t => t.source === 'user' && t.subtype === tag.subtype && t.timing === tag.timing
+        );
+        if (hasUserOverride) continue;
+      }
+
       let drawCount;
       if (tag.subtype === 'draw_scaling_tap') {
         const counterKey = tag.counterType || 'scaling';
@@ -270,7 +289,10 @@ function resolveTapDraws(gs) {
         bf.counters[counterKey] = (bf.counters[counterKey] || 0) + 1;
         drawCount = bf.counters[counterKey];
       } else {
-        drawCount = tag.value ?? 1;
+        // User tags with expectedValue drive simulation for conditional effects
+        drawCount = (tag.source === 'user' && tag.expectedValue != null)
+          ? Math.floor(tag.expectedValue)
+          : (tag.value ?? 1);
       }
 
       for (let d = 0; d < drawCount; d++) {
@@ -541,7 +563,7 @@ function computeTurnBySummary(games, maxTurns) {
 
   // Cumulative cards drawn by turn N (7 from opening hand + each draw step + effects)
   const avgCardsDrawnByTurn = {};
-  const SNAPSHOT_TURNS = [3, 5, 7, 10].filter(t => t <= maxTurns);
+  const SNAPSHOT_TURNS = Array.from({ length: maxTurns }, (_, i) => i + 1);
 
   for (const snapTurn of SNAPSHOT_TURNS) {
     let total = 0;
