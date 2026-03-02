@@ -808,6 +808,32 @@ textarea.input-text {
   margin-bottom: 6px;
 }
 
+.disc-priority-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  cursor: grab;
+  user-select: none;
+}
+
+.disc-priority-row:active { cursor: grabbing; }
+
+.disc-priority-row.disc-drag-over {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+
+.drag-handle {
+  color: var(--text-muted);
+  font-size: 14px;
+  line-height: 1;
+  cursor: grab;
+}
+
 .select-sm {
   font-size: 11px;
   padding: 5px 26px 5px 8px;
@@ -955,6 +981,40 @@ textarea.input-text {
 .effect-chip--simulatable_soon { color: #60a5fa; border-color: rgba(96,165,250,0.3); background: rgba(96,165,250,0.08); }
 .effect-chip--user { outline: 1px solid currentColor; outline-offset: 1px; }
 
+/* ─── Card Image Preview (floating, follows cursor) ─────────────────────────── */
+#card-image-preview {
+  position: fixed;
+  display: none;
+  z-index: 500;
+  pointer-events: none;
+  gap: 6px;
+}
+#card-image-preview img {
+  width: 200px;
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.8);
+  display: block;
+}
+#card-image-preview-img-back {
+  display: none;
+}
+#card-image-preview.dual {
+  display: flex;
+}
+#card-image-preview.dual img {
+  width: 185px;
+  display: block;
+}
+.card-effect-image--dual {
+  width: 200px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.card-effect-image--dual img {
+  width: 100%;
+}
+
 /* ─── Card Effect Editor ────────────────────────────────────────────────────── */
 .card-effect-editor {
   background: var(--bg-2);
@@ -962,6 +1022,23 @@ textarea.input-text {
   border-top: none;
   border-radius: 0 0 var(--radius) var(--radius);
   padding: 10px 12px 12px;
+  display: flex;
+  gap: 16px;
+  align-items: flex-start;
+}
+.card-effect-image {
+  flex-shrink: 0;
+  width: 200px;
+}
+.card-effect-image img {
+  width: 100%;
+  border-radius: 12px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.6);
+  display: block;
+}
+.card-effect-body {
+  flex: 1;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;

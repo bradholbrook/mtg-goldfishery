@@ -220,6 +220,10 @@ function extractEnrichmentFields(scryfallCard) {
       types,
       isMDFC: true,
       faces,
+      imageUrl: scryfallCard.image_uris?.normal
+             ?? scryfallCard.card_faces?.[0]?.image_uris?.normal
+             ?? null,
+      backImageUrl: scryfallCard.card_faces?.[1]?.image_uris?.normal ?? null,
     };
   }
 
@@ -249,6 +253,10 @@ function extractEnrichmentFields(scryfallCard) {
     types,
     isMDFC: false,
     faces: null,
+    imageUrl: scryfallCard.image_uris?.normal
+           ?? scryfallCard.card_faces?.[0]?.image_uris?.normal
+           ?? null,
+    backImageUrl: null,
   };
 }
 

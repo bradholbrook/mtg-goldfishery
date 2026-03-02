@@ -11,6 +11,7 @@ import {
   addDeck, removeDeck, addResults,
   getDeckById, saveToFile, loadFromFile,
   updateDeckGoodHandDefs, removeGoodHandDef,
+  updateDeckDiscardPriorities,
 } from './storage.js';
 import {
   renderDeckList, renderActiveDeck, showToast,
@@ -33,7 +34,7 @@ let activeDeckId = null;
  */
 let editingDef = null;
 
-let activeTab = 'overview';
+let activeTab = 'cards';
 
 /** Card names currently expanded in the Cards tab effect editor. */
 const expandedEffectCards = new Set();
@@ -340,6 +341,58 @@ window.__ghh = {
   },
 };
 
+// ─── Discard Priority Actions ─────────────────────────────────────────────────
+//
+// Exposed on window.__disc so config-tab onclick= attributes can reach them.
+// All structural changes call refresh(); value changes mutate in place (no refresh).
+
+window.__disc = {
+  _dragSrc: null,
+
+  add() {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    if (!Array.isArray(deck.discardPriorities)) deck.discardPriorities = [];
+    deck.discardPriorities.push({ id: generateId(), modifier: 'highest_cmc', cardType: 'Any' });
+    updateDeckDiscardPriorities(deck.id, deck.discardPriorities);
+    refresh();
+  },
+
+  remove(idx) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    deck.discardPriorities = (deck.discardPriorities || []).filter((_, i) => i !== idx);
+    updateDeckDiscardPriorities(deck.id, deck.discardPriorities);
+    refresh();
+  },
+
+  /** Direct mutation — no refresh needed, dropdowns are already updated. */
+  set(idx, key, val) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.discardPriorities?.[idx]) return;
+    deck.discardPriorities[idx][key] = val;
+  },
+
+  dragStart(idx) {
+    this._dragSrc = idx;
+  },
+
+  drop(targetIdx) {
+    if (this._dragSrc === null || this._dragSrc === targetIdx) {
+      this._dragSrc = null;
+      return;
+    }
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.discardPriorities) return;
+    const priorities = [...deck.discardPriorities];
+    const [moved] = priorities.splice(this._dragSrc, 1);
+    priorities.splice(targetIdx, 0, moved);
+    updateDeckDiscardPriorities(deck.id, priorities);
+    this._dragSrc = null;
+    refresh();
+  },
+};
+
 // ─── Effect Tag Editor Actions ────────────────────────────────────────────────
 //
 // Exposed on window.__eff so onclick= attributes in effect editor templates can
@@ -358,6 +411,7 @@ window.__eff = {
     const wasOpen = expandedEffectCards.has(cardName);
     expandedEffectCards.clear();
     if (!wasOpen) expandedEffectCards.add(cardName);
+    window.__preview?.setLocked(expandedEffectCards.size > 0);
     refresh();
   },
 
@@ -392,7 +446,6 @@ window.__eff = {
       ...(typeInfo?.defaultValues() ?? {}),
       // Inherit the auto-detected value so the override starts accurate
       value:         autoTag.value,
-      isConditional: autoTag.isConditional ?? false,
     });
     refresh();
   },
@@ -448,8 +501,6 @@ window.__eff = {
     const tag = card.effectTags[tagIdx];
     if (!tag || tag.source !== 'user') return;
     tag[fieldKey] = value;
-    // isConditional changes affect which fields are shown — need re-render
-    if (fieldKey === 'isConditional') refresh();
   },
 
   /**
@@ -478,7 +529,6 @@ window.__eff = {
       category:      typeInfo.category,
       subtype:       subtypeId,
       timing:        availableTiming,
-      isConditional: false,
       condition:     null,
       expectedValue: null,
       tier:          typeInfo.defaultTier,
@@ -509,6 +559,53 @@ window.__eff = {
   },
 
 };
+
+// ─── Card Image Preview ───────────────────────────────────────────────────────
+
+{
+  const _previewEl      = document.getElementById('card-image-preview');
+  const _previewImg     = document.getElementById('card-image-preview-img');
+  const _previewImgBack = document.getElementById('card-image-preview-img-back');
+
+  let _locked = false;
+  window.__preview = {
+    show(imageUrl, backImageUrl) {
+      if (_locked || !imageUrl || !_previewEl || !_previewImg) return;
+      _previewImg.src = imageUrl;
+      if (backImageUrl && _previewImgBack) {
+        _previewImgBack.src = backImageUrl;
+        _previewEl.classList.add('dual');
+      } else {
+        if (_previewImgBack) _previewImgBack.src = '';
+        _previewEl.classList.remove('dual');
+      }
+      _previewEl.style.display = backImageUrl ? 'flex' : 'block';
+    },
+    hide() {
+      if (_previewEl) {
+        _previewEl.style.display = 'none';
+        _previewEl.classList.remove('dual');
+      }
+    },
+    setLocked(val) {
+      _locked = val;
+      if (val && _previewEl) {
+        _previewEl.style.display = 'none';
+        _previewEl.classList.remove('dual');
+      }
+    },
+  };
+
+  document.addEventListener('mousemove', e => {
+    if (!_previewEl || _previewEl.style.display === 'none') return;
+    const w = _previewEl.offsetWidth || 220;
+    const h = _previewEl.offsetHeight || 310;
+    const x = Math.min(e.clientX + 20, window.innerWidth - w - 10);
+    const y = Math.max(10, Math.min(e.clientY - 50, window.innerHeight - h - 10));
+    _previewEl.style.left = x + 'px';
+    _previewEl.style.top  = y + 'px';
+  });
+}
 
 // ─── Tab Navigation ───────────────────────────────────────────────────────────
 

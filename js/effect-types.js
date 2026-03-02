@@ -16,17 +16,17 @@ export const EFFECT_TYPES = {
     id:            'draw_n',
     label:         'Draw N cards',
     category:      'draw',
-    validTimings:  ['etb', 'upkeep', 'cast', 'tap', 'death', 'draw_step', 'passive'],
+    validTimings:  ['etb', 'land_etb', 'creature_etb', 'upkeep', 'cast', 'tap', 'death', 'draw_step', 'passive'],
     permanentOnly: false,
     defaultTier:   'simulatable',
     fields: [
-      { key: 'value',         widget: 'number',   label: 'Cards', min: 1, max: 20, default: 1 },
-      { key: 'isConditional', widget: 'checkbox', label: 'May / conditional' },
+      { key: 'value', widget: 'number', label: 'Cards', min: 1, max: 20, default: 1 },
     ],
-    defaultValues: () => ({ value: 1, isConditional: false, expectedValue: null }),
+    defaultValues: () => ({ value: 1, expectedValue: null }),
     describe(tag) {
       const cond = tag.isConditional ? ' (may)' : '';
-      return `draw ${tag.value ?? 1}${cond} @ ${tag.timing}`;
+      const v    = tag.expectedValue != null ? Math.floor(tag.expectedValue) : (tag.value ?? 1);
+      return `draw ${v}${cond}   ${tag.timing}`;
     },
   },
 
@@ -34,13 +34,19 @@ export const EFFECT_TYPES = {
     id:            'loot',
     label:         'Loot (draw, then discard)',
     category:      'draw',
-    validTimings:  ['etb', 'upkeep', 'cast', 'tap', 'death', 'passive'],
+    validTimings:  ['etb', 'land_etb', 'creature_etb', 'upkeep', 'cast', 'tap', 'death', 'passive'],
     permanentOnly: false,
-    defaultTier:   'simulatable_soon',
-    fields: [],
-    defaultValues: () => ({}),
+    defaultTier:   'simulatable',
+    fields: [
+      { key: 'value',        widget: 'number', label: 'Draw',    min: 1, max: 10, default: 1 },
+      { key: 'discardCount', widget: 'number', label: 'Discard', min: 1, max: 10, default: 1 },
+    ],
+    defaultValues: () => ({ value: 1, discardCount: 1, isAdditionalCost: false }),
     describe(tag) {
-      return `loot @ ${tag.timing}`;
+      const v = tag.value ?? 1;
+      const d = tag.discardCount ?? 1;
+      const cost = tag.isAdditionalCost ? ' (cost)' : '';
+      return `loot draw ${v} / discard ${d}${cost} @ ${tag.timing}`;
     },
   },
 
@@ -72,7 +78,8 @@ export const EFFECT_TYPES = {
     ],
     defaultValues: () => ({ value: 1 }),
     describe(tag) {
-      return `tap: +${tag.value ?? 1} mana`;
+      const v = tag.expectedValue != null ? Math.floor(tag.expectedValue) : (tag.value ?? 1);
+      return `tap: +${v} mana`;
     },
   },
 
@@ -88,7 +95,8 @@ export const EFFECT_TYPES = {
     ],
     defaultValues: () => ({ value: 1 }),
     describe(tag) {
-      return `${tag.timing}: fetch ${tag.value ?? 1} land(s)`;
+      const v = tag.expectedValue != null ? Math.floor(tag.expectedValue) : (tag.value ?? 1);
+      return `${tag.timing}: fetch ${v} land(s)`;
     },
   },
 
@@ -104,7 +112,8 @@ export const EFFECT_TYPES = {
     ],
     defaultValues: () => ({ value: 3 }),
     describe(tag) {
-      return `cast: +${tag.value ?? 3} mana (ritual)`;
+      const v = tag.expectedValue != null ? Math.floor(tag.expectedValue) : (tag.value ?? 3);
+      return `cast: +${v} mana (ritual)`;
     },
   },
 

@@ -168,10 +168,11 @@ function simulateOpeningHand(flatDeck) {
  * Build an initial GameState from a shuffled flat deck.
  * Draws the opening hand (7 cards) from the library.
  *
- * @param {Card[]} flatDeck  - already shuffled
+ * @param {Card[]} flatDeck          - already shuffled
+ * @param {DiscardPriority[]} [discardPriorities=[]]
  * @returns {GameState}
  */
-function initGameState(flatDeck) {
+function initGameState(flatDeck, discardPriorities = []) {
   const library = [...flatDeck]; // already shuffled by caller
   const hand = library.splice(0, 7);
 
@@ -189,6 +190,7 @@ function initGameState(flatDeck) {
     currentTurnRecord: null,
     turnHistory: [],
     deckedOut: false,
+    discardPriorities,
   };
 }
 
@@ -201,20 +203,88 @@ function newTurnRecord(turn) {
   return { turn, cardsDrawn: [], landsPlayed: [], spellsCast: [], manaSpent: 0, effectsFired: [] };
 }
 
+/**
+ * Draw one card into hand. Sets gs.deckedOut and returns false if library is empty.
+ * All card draws must go through here so the loss condition is handled consistently.
+ *
+ * @param {GameState} gs
+ * @param {string|null} effectLabel  - if provided, pushed to effectsFired (e.g. "The One Ring:tap:draw")
+ * @returns {boolean} true if a card was drawn, false if the library was empty (deckedOut set)
+ */
+function drawCard(gs, effectLabel = null) {
+  if (gs.library.length === 0) {
+    gs.deckedOut = true;
+    return false;
+  }
+  const drawn = gs.library.shift();
+  gs.hand.push(drawn);
+  gs.currentTurnRecord.cardsDrawn.push(drawn);
+  if (effectLabel) gs.currentTurnRecord.effectsFired.push(effectLabel);
+  return true;
+}
+
+// ─── Discard Selection ────────────────────────────────────────────────────────
+
+/**
+ * Choose the best card to discard from hand given an ordered priority list.
+ * Rules are evaluated top-to-bottom; first matching rule wins.
+ * Fallback (if no rule matches or list is empty): highest CMC card.
+ *
+ * @param {Card[]} hand
+ * @param {DiscardPriority[]} [discardPriorities=[]]
+ * @returns {Card|null}
+ */
+function selectCardToDiscard(hand, discardPriorities = []) {
+  if (!hand.length) return null;
+
+  for (const rule of discardPriorities) {
+    const pool = rule.cardType === 'Any'
+      ? [...hand]
+      : hand.filter(c => c.types?.includes(rule.cardType));
+    if (!pool.length) continue;
+
+    if (rule.modifier === 'highest_cmc')
+      return pool.reduce((a, b) => ((b.cmc ?? 0) > (a.cmc ?? 0) ? b : a));
+    if (rule.modifier === 'lowest_cmc')
+      return pool.reduce((a, b) => ((b.cmc ?? 0) < (a.cmc ?? 0) ? b : a));
+    if (rule.modifier === 'any')
+      return pool[0];
+  }
+
+  // Fallback: highest CMC
+  return hand.reduce((a, b) => ((b.cmc ?? 0) > (a.cmc ?? 0) ? b : a), hand[0]);
+}
+
 // ─── Effect Resolution ────────────────────────────────────────────────────────
 
 /**
- * Resolve all simulatable draw effects with a given timing for permanents on battlefield.
- * Draws go into the hand immediately (available next turn — conservative model).
+ * Check whether a card being cast satisfies a tag's triggerFilter.
+ * Returns true if there is no filter (filter is null/undefined).
+ *
+ * @param {Card} card            - the card being cast
+ * @param {import('./types.js').TriggerFilter|null} triggerFilter
+ * @returns {boolean}
+ */
+function matchesTriggerFilter(card, triggerFilter) {
+  if (!triggerFilter) return true;
+  const types = card.types ?? [];
+  if (triggerFilter.isCommander && !card.isCommander) return false;
+  if (triggerFilter.spellTypes && !triggerFilter.spellTypes.some(t => types.includes(t))) return false;
+  if (triggerFilter.excludeTypes && triggerFilter.excludeTypes.some(t => types.includes(t))) return false;
+  return true;
+}
+
+/**
+ * Resolve all simulatable draw_n effects with a given timing.
+ * Loot effects (subtype === 'loot') are handled separately by resolveLootEffects.
  *
  * @param {GameState} gs
- * @param {'etb'|'upkeep'} timing
- * @param {Card[]} [subset]  - if provided, only resolve effects for these cards (e.g. just-played ETB)
- * @returns {void}  - mutates gs in place
+ * @param {'etb'|'land_etb'|'upkeep'|'cast'|'passive'} timing
+ * @param {Array<{card: Card}>} [subset]     - if null, resolves for full battlefield
+ * @param {Card|null}           [castingCard] - the spell being cast; used for cast trigger filters
+ * @returns {void}
  */
-function resolveDrawEffects(gs, timing, subset = null) {
-  // subset, when provided, is already an array of BattlefieldCard-shaped objects
-  // { card } — do NOT re-wrap it.
+function resolveDrawEffects(gs, timing, subset = null, castingCard = null) {
   const permanents = subset ?? gs.battlefield;
 
   for (const { card } of permanents) {
@@ -222,7 +292,13 @@ function resolveDrawEffects(gs, timing, subset = null) {
     for (const tag of card.effectTags) {
       if (tag.tier !== 'simulatable') continue;
       if (tag.category !== 'draw') continue;
+      if (tag.subtype === 'loot') continue;   // handled by resolveLootEffects
       if (tag.timing !== timing) continue;
+
+      // Apply trigger filter for cast-timing effects
+      if (timing === 'cast' && castingCard !== null) {
+        if (!matchesTriggerFilter(castingCard, tag.triggerFilter ?? null)) continue;
+      }
 
       // Skip auto tag if user has overridden the same (subtype, timing) pair
       if (tag.source === 'auto') {
@@ -237,11 +313,63 @@ function resolveDrawEffects(gs, timing, subset = null) {
         ? Math.floor(tag.expectedValue)
         : (tag.value ?? 1);
       for (let d = 0; d < drawCount; d++) {
-        if (gs.library.length === 0) { gs.deckedOut = true; return; }
-        const drawn = gs.library.shift();
-        gs.hand.push(drawn);
-        gs.currentTurnRecord.cardsDrawn.push(drawn);
-        gs.currentTurnRecord.effectsFired.push(`${card.name}:${timing}:draw`);
+        if (!drawCard(gs, `${card.name}:${timing}:draw`)) return;
+      }
+    }
+  }
+}
+
+/**
+ * Resolve all simulatable loot effects with a given timing.
+ * Each loot: draw tag.value cards, then discard tag.discardCount cards.
+ *
+ * @param {GameState} gs
+ * @param {'etb'|'land_etb'|'upkeep'|'cast'|'passive'|'tap'} timing
+ * @param {Array<{card: Card}>} [subset]     - if null, resolves for full battlefield
+ * @param {Card|null}           [castingCard] - the spell being cast; used for cast trigger filters
+ * @returns {void}
+ */
+function resolveLootEffects(gs, timing, subset = null, castingCard = null) {
+  const permanents = subset ?? gs.battlefield;
+
+  for (const { card } of permanents) {
+    if (!card.effectTags) continue;
+    for (const tag of card.effectTags) {
+      if (tag.tier !== 'simulatable') continue;
+      if (tag.subtype !== 'loot') continue;
+      if (tag.timing !== timing) continue;
+
+      // Apply trigger filter for cast-timing effects
+      if (timing === 'cast' && castingCard !== null) {
+        if (!matchesTriggerFilter(castingCard, tag.triggerFilter ?? null)) continue;
+      }
+
+      if (tag.source === 'auto') {
+        const hasUserOverride = card.effectTags.some(
+          t => t.source === 'user' && t.subtype === tag.subtype && t.timing === tag.timing
+        );
+        if (hasUserOverride) continue;
+      }
+
+      const drawCount = (tag.source === 'user' && tag.expectedValue != null)
+        ? Math.floor(tag.expectedValue)
+        : (tag.value ?? 1);
+      const discardCount = tag.discardCount ?? 1;
+
+      // Draw first
+      for (let d = 0; d < drawCount; d++) {
+        if (!drawCard(gs, `${card.name}:${timing}:loot:draw`)) return;
+      }
+      if (gs.deckedOut) return;
+
+      // Then discard using priority selection
+      for (let d = 0; d < discardCount && gs.hand.length > 0; d++) {
+        const toDiscard = selectCardToDiscard(gs.hand, gs.discardPriorities);
+        if (!toDiscard) break;
+        const idx = gs.hand.indexOf(toDiscard);
+        gs.hand.splice(idx, 1);
+        gs.graveyard.push(toDiscard);
+        gs.currentTurnRecord.effectsFired.push(`${card.name}:${timing}:loot:discard`);
       }
     }
   }
@@ -264,9 +392,15 @@ function resolveDrawEffects(gs, timing, subset = null) {
  * @param {GameState} gs
  */
 function resolveTapDraws(gs) {
+  let tappedAny = false;
   for (const bf of gs.battlefield) {
     if (bf.tapped) continue;
     if (!bf.card.effectTags) continue;
+
+    // Summoning sickness: creatures that entered this turn can't use tap abilities.
+    // Non-creature permanents (artifacts, enchantments, etc.) have no such restriction.
+    const isCreature = bf.card.types?.some(t => t.toLowerCase() === 'creature');
+    if (isCreature && bf.turnEntered === gs.turn) continue;
 
     let shouldTap = false;
 
@@ -282,31 +416,43 @@ function resolveTapDraws(gs) {
         if (hasUserOverride) continue;
       }
 
-      let drawCount;
       if (tag.subtype === 'draw_scaling_tap') {
         const counterKey = tag.counterType || 'scaling';
         if (!bf.counters) bf.counters = {};
         bf.counters[counterKey] = (bf.counters[counterKey] || 0) + 1;
-        drawCount = bf.counters[counterKey];
+        const drawCount = bf.counters[counterKey];
+        for (let d = 0; d < drawCount; d++) {
+          if (!drawCard(gs, `${bf.card.name}:tap:draw`)) return tappedAny;
+        }
+      } else if (tag.subtype === 'loot') {
+        const drawCount = tag.value ?? 1;
+        const discardCount = tag.discardCount ?? 1;
+        for (let d = 0; d < drawCount; d++) {
+          if (!drawCard(gs, `${bf.card.name}:tap:loot:draw`)) return tappedAny;
+        }
+        for (let d = 0; d < discardCount && gs.hand.length > 0; d++) {
+          const toDiscard = selectCardToDiscard(gs.hand, gs.discardPriorities);
+          if (!toDiscard) break;
+          const idx = gs.hand.indexOf(toDiscard);
+          gs.hand.splice(idx, 1);
+          gs.graveyard.push(toDiscard);
+          gs.currentTurnRecord.effectsFired.push(`${bf.card.name}:tap:loot:discard`);
+        }
       } else {
-        // User tags with expectedValue drive simulation for conditional effects
-        drawCount = (tag.source === 'user' && tag.expectedValue != null)
+        // draw_n: user tags with expectedValue drive simulation for conditional effects
+        const drawCount = (tag.source === 'user' && tag.expectedValue != null)
           ? Math.floor(tag.expectedValue)
           : (tag.value ?? 1);
-      }
-
-      for (let d = 0; d < drawCount; d++) {
-        if (gs.library.length === 0) { gs.deckedOut = true; return; }
-        const drawn = gs.library.shift();
-        gs.hand.push(drawn);
-        gs.currentTurnRecord.cardsDrawn.push(drawn);
-        gs.currentTurnRecord.effectsFired.push(`${bf.card.name}:tap:draw`);
+        for (let d = 0; d < drawCount; d++) {
+          if (!drawCard(gs, `${bf.card.name}:tap:draw`)) return tappedAny;
+        }
       }
       shouldTap = true;
     }
 
-    if (shouldTap) bf.tapped = true;
+    if (shouldTap) { bf.tapped = true; tappedAny = true; }
   }
+  return tappedAny;
 }
 
 // ─── Greedy Cast Scoring ──────────────────────────────────────────────────────
@@ -375,7 +521,7 @@ function castScore(card, strategy) {
  */
 function simulateGame(flatDeck, strategy) {
   const library = shuffle([...flatDeck]);
-  const gs = initGameState(library);
+  const gs = initGameState(library, strategy.discardPriorities ?? []);
   const openingHand = [...gs.hand];
 
   for (let turn = 1; turn <= strategy.maxTurns; turn++) {
@@ -389,16 +535,14 @@ function simulateGame(flatDeck, strategy) {
 
     // ── Upkeep ─────────────────────────────────────────────────────────────
     resolveDrawEffects(gs, 'upkeep');
+    resolveLootEffects(gs, 'upkeep');
     if (gs.deckedOut) break;
 
     // ── Draw ───────────────────────────────────────────────────────────────
     if (turn === 1) {
       // In Commander, going first still draws (no skip-draw rule in goldfishing)
     }
-    if (gs.library.length === 0) { gs.deckedOut = true; break; }
-    const drawn = gs.library.shift();
-    gs.hand.push(drawn);
-    gs.currentTurnRecord.cardsDrawn.push(drawn);
+    if (!drawCard(gs)) break;
 
     // ── Mana ───────────────────────────────────────────────────────────────
     gs.manaAvailable = gs.battlefield.filter(bf => isLand(bf.card)).length;
@@ -425,60 +569,96 @@ function simulateGame(flatDeck, strategy) {
       gs.landPlayedThisTurn = true;
       gs.manaAvailable += 1;
       gs.currentTurnRecord.landsPlayed.push(land);
+      // Fire land ETB triggers (e.g. Tatyova, Benthic Druid)
+      resolveDrawEffects(gs, 'land_etb');
+      resolveLootEffects(gs, 'land_etb');
     }
 
-    // ── Tap Draw ───────────────────────────────────────────────────────────
-    // Activate tap-draw abilities (e.g. Staff of Nin, The One Ring) before
-    // the cast loop so drawn cards are available for casting decisions.
-    resolveTapDraws(gs);
-    if (gs.deckedOut) break;
+    // ── Main Phase ─────────────────────────────────────────────────────────
+    // Interleaved tap-draw and casting: activate tap abilities, cast spells,
+    // then repeat in case new permanents entered (with tap abilities) or new
+    // cards were drawn (enabling additional casts). Models MTG's first main phase.
+    // Non-creature permanents can tap on the turn they enter (no summoning sickness).
+    let mainPhaseProgress = true;
+    while (mainPhaseProgress) {
+      mainPhaseProgress = false;
 
-    // ── Cast loop ──────────────────────────────────────────────────────────
-    let castedThisPass = true;
-    while (castedThisPass && gs.manaAvailable > 0) {
-      castedThisPass = false;
+      // ── Tap Draw ─────────────────────────────────────────────────────────
+      // Activate all available tap-draw abilities. Respects summoning sickness:
+      // creatures that entered this turn are skipped; artifacts/enchantments etc. are not.
+      if (resolveTapDraws(gs)) mainPhaseProgress = true;
+      if (gs.deckedOut) break;
 
-      // Find all castable cards in hand (non-land or MDFC spell face), sorted by priority
-      const castable = gs.hand
-        .filter(c => isCastableAsSpell(c) && effectiveCost(c, gs) <= gs.manaAvailable)
-        .sort((a, b) => castScore(a, strategy) - castScore(b, strategy));
+      // ── Cast pass ────────────────────────────────────────────────────────
+      // No mana guard — 0-cost spells are valid. Cost check is in the filter below.
+      let castedThisPass = true;
+      while (castedThisPass) {
+        castedThisPass = false;
 
-      if (castable.length === 0) break;
+        // Find all castable cards in hand (non-land or MDFC spell face), sorted by priority.
+        // Additional-cost loot spells (e.g. Tormenting Voice) require at least one other
+        // card in hand to discard as an additional cost.
+        const castable = gs.hand
+          .filter(c => {
+            if (!isCastableAsSpell(c)) return false;
+            if (effectiveCost(c, gs) > gs.manaAvailable) return false;
+            const addlCost = c.effectTags?.find(
+              t => t.subtype === 'loot' && t.isAdditionalCost && t.tier === 'simulatable'
+            );
+            if (addlCost && gs.hand.length - 1 < (addlCost.discardCount ?? 1)) return false;
+            return true;
+          })
+          .sort((a, b) => castScore(a, strategy) - castScore(b, strategy));
 
-      const toCast = castable[0];
-      const cost = effectiveCost(toCast, gs);
+        if (castable.length === 0) break;
 
-      // Remove from hand
-      const handIdx = gs.hand.indexOf(toCast);
-      gs.hand.splice(handIdx, 1);
+        const toCast = castable[0];
+        const cost = effectiveCost(toCast, gs);
 
-      // Enter battlefield (if permanent) or graveyard.
-      // For MDFCs being cast as a spell, use the spell face's types to determine
-      // permanence — a Sorcery // Land cast as a sorcery goes to the graveyard.
-      const castFaceTypes = toCast.isMDFC
-        ? (getMDFCSpellFace(toCast)?.types ?? toCast.types)
-        : toCast.types;
-      const isPermanent = castFaceTypes?.some(t =>
-        ['creature', 'artifact', 'enchantment', 'planeswalker', 'land', 'battle'].includes(t.toLowerCase())
-      );
+        // Remove from hand
+        const handIdx = gs.hand.indexOf(toCast);
+        gs.hand.splice(handIdx, 1);
 
-      if (toCast.isCommander) gs.commanderCastCount++;
+        // Enter battlefield (if permanent) or graveyard.
+        // For MDFCs being cast as a spell, use the spell face's types to determine
+        // permanence — a Sorcery // Land cast as a sorcery goes to the graveyard.
+        const castFaceTypes = toCast.isMDFC
+          ? (getMDFCSpellFace(toCast)?.types ?? toCast.types)
+          : toCast.types;
+        const isPermanent = castFaceTypes?.some(t =>
+          ['creature', 'artifact', 'enchantment', 'planeswalker', 'land', 'battle'].includes(t.toLowerCase())
+        );
 
-      if (isPermanent) {
-        const bfEntry = { card: toCast, tapped: false, turnEntered: turn, counters: {} };
-        gs.battlefield.push(bfEntry);
-        // Fire ETB effects — only newly entered card
-        resolveDrawEffects(gs, 'etb', [bfEntry]);
-      } else {
-        // Resolve the spell's own draw effects (timing: 'passive' = "on resolution")
-        resolveDrawEffects(gs, 'passive', [{ card: toCast }]);
-        gs.graveyard.push(toCast);
+        if (toCast.isCommander) gs.commanderCastCount++;
+
+        // Fire cast-timing draw/loot effects from battlefield permanents
+        // (e.g. "Whenever you cast a creature spell, draw a card").
+        // Fires before resolution so battlefield reflects state at cast time.
+        // Pass toCast so triggerFilters are evaluated against the spell being cast.
+        resolveDrawEffects(gs, 'cast', null, toCast);
+        resolveLootEffects(gs, 'cast', null, toCast);
+        if (gs.deckedOut) break;
+
+        if (isPermanent) {
+          const bfEntry = { card: toCast, tapped: false, turnEntered: turn, counters: {} };
+          gs.battlefield.push(bfEntry);
+          // Fire ETB effects — only newly entered card
+          resolveDrawEffects(gs, 'etb', [bfEntry]);
+          resolveLootEffects(gs, 'etb', [bfEntry]);
+        } else {
+          // Resolve the spell's own draw/loot effects on resolution
+          resolveDrawEffects(gs, 'passive', [{ card: toCast }]);
+          resolveLootEffects(gs, 'passive', [{ card: toCast }]);
+          gs.graveyard.push(toCast);
+        }
+
+        gs.manaAvailable -= cost;
+        gs.currentTurnRecord.manaSpent += cost;
+        gs.currentTurnRecord.spellsCast.push(toCast);
+        castedThisPass = true;
+        mainPhaseProgress = true; // new permanent may have tap abilities; loop back
+        if (gs.deckedOut) break;
       }
-
-      gs.manaAvailable -= cost;
-      gs.currentTurnRecord.manaSpent += cost;
-      gs.currentTurnRecord.spellsCast.push(toCast);
-      castedThisPass = true;
     }
 
     // ── Record ─────────────────────────────────────────────────────────────
@@ -590,9 +770,13 @@ function computeTurnBySummary(games, maxTurns) {
 
     for (const record of turnHistory) {
       for (const fired of record.effectsFired) {
-        // Format: "CardName:timing:draw"
-        const [cardName, , effectType] = fired.split(':');
-        if (effectType === 'draw') {
+        // Formats:
+        //   draw_n:  "CardName:timing:draw"
+        //   loot:    "CardName:timing:loot:draw"  or  "CardName:timing:loot:discard"
+        // Check the last segment to catch both draw_n and loot draws.
+        const parts = fired.split(':');
+        const cardName = parts[0];
+        if (parts[parts.length - 1] === 'draw') {
           effectDrawsThisGame++;
           sourcesThisGame.add(cardName);
           drawSourceTotals[cardName] = (drawSourceTotals[cardName] || 0) + 1;
@@ -641,7 +825,11 @@ export function runSimulation(deck, gameCount = 1000, goodHandDefs = []) {
   }
 
   const isEnriched = deck.enriched === true;
-  const strategy = { ...DEFAULT_STRATEGY_CONFIG, ...(deck.strategyConfig || {}) };
+  const strategy = {
+    ...DEFAULT_STRATEGY_CONFIG,
+    ...(deck.strategyConfig || {}),
+    discardPriorities: deck.discardPriorities || [],
+  };
 
   let hands = [];
   let games = [];

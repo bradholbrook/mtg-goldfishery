@@ -214,6 +214,17 @@ export function removeGoodHandDef(deckId, defId) {
   deck.goodHandDefs = deck.goodHandDefs.filter(d => d.id !== defId);
 }
 
+// ─── Discard Priorities ───────────────────────────────────────────────────────
+
+/**
+ * Replace the full discardPriorities array on a deck.
+ */
+export function updateDeckDiscardPriorities(deckId, priorities) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.discardPriorities = priorities;
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatDateForFilename(date) {

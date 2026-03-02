@@ -22,6 +22,19 @@
  * @property {EffectTag[]}  effectTags     - Detected/user-overridden effect tags (all faces merged)
  * @property {boolean}      [isMDFC]       - true for modal double-faced cards
  * @property {CardFace[]|null} [faces]     - Per-face data for MDFCs; null for single-faced cards
+ * @property {string|null}  [imageUrl]     - Scryfall 'normal' image URL for the front face
+ * @property {string|null}  [backImageUrl] - Scryfall 'normal' image URL for the back face (MDFCs only)
+ */
+
+/**
+ * Filter describing which spell or event fires a triggered ability.
+ * Used on cast-timing tags to restrict when the trigger fires.
+ * null means "any spell / no filter".
+ *
+ * @typedef {Object} TriggerFilter
+ * @property {string[]|null} spellTypes    - CARD_TYPES values that must match (null = any spell)
+ * @property {string[]|null} [excludeTypes] - CARD_TYPES values that disqualify (e.g. noncreature)
+ * @property {boolean}       [isCommander] - only fire when your commander is cast
  */
 
 /**
@@ -31,10 +44,11 @@
  * @typedef {Object} EffectTag
  * @property {'draw'|'ramp'|'tutor'|'removal'|'token'|'other'} category
  * @property {string}   subtype        - e.g. 'draw_n', 'loot', 'land_fetch', 'add_mana_tap'
- * @property {'etb'|'cast'|'upkeep'|'tap'|'draw_step'|'death'|'passive'} timing
+ * @property {'etb'|'land_etb'|'creature_etb'|'cast'|'upkeep'|'tap'|'draw_step'|'death'|'passive'} timing
  * @property {number|null} value       - cards drawn, mana added, etc. null for scaling effects
  * @property {boolean}  isConditional
  * @property {string|null} condition   - human-readable condition description
+ * @property {TriggerFilter|null} [triggerFilter] - cast-timing trigger condition; null for self-ETB/upkeep/tap/passive
  * @property {string|null} [counterType]    - for draw_scaling_tap: counter name (e.g. 'burden')
  * @property {number|null} [expectedValue]  - User override: expected sim value for conditional effects (e.g. 2.0 expected draws)
  * @property {'simulatable'|'simulatable_soon'|'track_only'|'skip'} tier
@@ -112,8 +126,9 @@
  * @property {string}         importedAt      - ISO timestamp
  * @property {string}         moxfieldUrl     - Original URL if pasted
  * @property {boolean}        enriched        - true if cards have Scryfall data
- * @property {GoodHandDef[]}  goodHandDefs    - User-defined hand quality checks
- * @property {StrategyConfig} strategyConfig  - Simulation strategy (merged with defaults)
+ * @property {GoodHandDef[]}      goodHandDefs        - User-defined hand quality checks
+ * @property {DiscardPriority[]}  discardPriorities   - Ordered loot discard rules (additive; defaults to [])
+ * @property {StrategyConfig}     strategyConfig      - Simulation strategy (merged with defaults)
  */
 
 /**
@@ -159,6 +174,15 @@
  * @property {string}      id       - UUID
  * @property {string}      name     - User label, e.g. "Keepable Ramp Hand"
  * @property {Criterion[]} criteria
+ */
+
+/**
+ * A single discard priority rule for loot effects.
+ * Rules are evaluated top-to-bottom; first matching rule wins.
+ * @typedef {Object} DiscardPriority
+ * @property {string} id
+ * @property {'highest_cmc'|'lowest_cmc'|'any'} modifier
+ * @property {string} cardType  - CARD_TYPES value, or 'Any' for no filter
  */
 
 /**
