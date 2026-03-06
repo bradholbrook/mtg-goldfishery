@@ -170,9 +170,10 @@ function simulateOpeningHand(flatDeck) {
  *
  * @param {Card[]} flatDeck          - already shuffled
  * @param {DiscardPriority[]} [discardPriorities=[]]
+ * @param {Object} [xCosts={}]      - { [cardName]: number } user-set X values for X-cost spells
  * @returns {GameState}
  */
-function initGameState(flatDeck, discardPriorities = []) {
+function initGameState(flatDeck, discardPriorities = [], xCosts = {}) {
   const library = [...flatDeck]; // already shuffled by caller
   const hand = library.splice(0, 7);
 
@@ -191,6 +192,7 @@ function initGameState(flatDeck, discardPriorities = []) {
     turnHistory: [],
     deckedOut: false,
     discardPriorities,
+    xCosts,
   };
 }
 
@@ -200,7 +202,7 @@ function initGameState(flatDeck, discardPriorities = []) {
  * @returns {TurnRecord}
  */
 function newTurnRecord(turn) {
-  return { turn, cardsDrawn: [], landsPlayed: [], spellsCast: [], manaSpent: 0, effectsFired: [] };
+  return { turn, cardsDrawn: [], landsPlayed: [], spellsCast: [], manaSpent: 0, manaAvailable: 0, manaFromRocks: 0, effectsFired: [] };
 }
 
 /**
@@ -271,6 +273,9 @@ function matchesTriggerFilter(card, triggerFilter) {
   if (triggerFilter.isCommander && !card.isCommander) return false;
   if (triggerFilter.spellTypes && !triggerFilter.spellTypes.some(t => types.includes(t))) return false;
   if (triggerFilter.excludeTypes && triggerFilter.excludeTypes.some(t => types.includes(t))) return false;
+  if (triggerFilter.minCmc != null && (card.cmc ?? 0) < triggerFilter.minCmc) return false;
+  if (triggerFilter.maxCmc != null && (card.cmc ?? 0) > triggerFilter.maxCmc) return false;
+  // deathSubject not evaluated — death is track_only; hook ready for future sim phase
   return true;
 }
 
@@ -293,10 +298,14 @@ function resolveDrawEffects(gs, timing, subset = null, castingCard = null) {
       if (tag.tier !== 'simulatable') continue;
       if (tag.category !== 'draw') continue;
       if (tag.subtype === 'loot') continue;   // handled by resolveLootEffects
-      if (tag.timing !== timing) continue;
+      // Legacy 'passive' in old saves maps to 'on_resolution'
+      const timingMatch = tag.timing === timing ||
+        (timing === 'on_resolution' && tag.timing === 'passive');
+      if (!timingMatch) continue;
 
-      // Apply trigger filter for cast-timing effects
-      if (timing === 'cast' && castingCard !== null) {
+      // Apply trigger filter for cast-timing and creature_etb effects.
+      // For creature_etb, castingCard is the entering creature (checked for maxCmc etc.).
+      if ((timing === 'cast' || timing === 'opponent_cast' || timing === 'creature_etb') && castingCard !== null) {
         if (!matchesTriggerFilter(castingCard, tag.triggerFilter ?? null)) continue;
       }
 
@@ -308,10 +317,15 @@ function resolveDrawEffects(gs, timing, subset = null, castingCard = null) {
         if (hasUserOverride) continue;
       }
 
-      // User tags with expectedValue drive simulation for conditional effects
-      const drawCount = (tag.source === 'user' && tag.expectedValue != null)
-        ? Math.floor(tag.expectedValue)
-        : (tag.value ?? 1);
+      // Determine draw count: EV override > X-cost lookup > detected value
+      let drawCount;
+      if (tag.source === 'user' && tag.expectedValue != null) {
+        drawCount = Math.floor(tag.expectedValue);
+      } else if (tag.condition === 'draw X') {
+        drawCount = gs.xCosts?.[card.name] ?? 0;
+      } else {
+        drawCount = tag.value ?? 1;
+      }
       for (let d = 0; d < drawCount; d++) {
         if (!drawCard(gs, `${card.name}:${timing}:draw`)) return;
       }
@@ -324,7 +338,7 @@ function resolveDrawEffects(gs, timing, subset = null, castingCard = null) {
  * Each loot: draw tag.value cards, then discard tag.discardCount cards.
  *
  * @param {GameState} gs
- * @param {'etb'|'land_etb'|'upkeep'|'cast'|'passive'|'tap'} timing
+ * @param {'etb'|'land_etb'|'upkeep'|'cast'|'on_resolution'|'tap'} timing
  * @param {Array<{card: Card}>} [subset]     - if null, resolves for full battlefield
  * @param {Card|null}           [castingCard] - the spell being cast; used for cast trigger filters
  * @returns {void}
@@ -337,10 +351,14 @@ function resolveLootEffects(gs, timing, subset = null, castingCard = null) {
     for (const tag of card.effectTags) {
       if (tag.tier !== 'simulatable') continue;
       if (tag.subtype !== 'loot') continue;
-      if (tag.timing !== timing) continue;
+      // Legacy 'passive' in old saves maps to 'on_resolution'
+      const timingMatch = tag.timing === timing ||
+        (timing === 'on_resolution' && tag.timing === 'passive');
+      if (!timingMatch) continue;
 
-      // Apply trigger filter for cast-timing effects
-      if (timing === 'cast' && castingCard !== null) {
+      // Apply trigger filter for cast-timing and creature_etb effects.
+      // For creature_etb, castingCard is the entering creature (checked for maxCmc etc.).
+      if ((timing === 'cast' || timing === 'opponent_cast' || timing === 'creature_etb') && castingCard !== null) {
         if (!matchesTriggerFilter(castingCard, tag.triggerFilter ?? null)) continue;
       }
 
@@ -409,6 +427,8 @@ function resolveTapDraws(gs) {
       if (tag.timing !== 'tap') continue;
 
       // Skip auto tag if user has overridden the same (subtype, timing) pair
+      if (tag.category !== 'draw') continue; // mana_rock and other ramp tags are handled in Mana phase
+
       if (tag.source === 'auto') {
         const hasUserOverride = bf.card.effectTags.some(
           t => t.source === 'user' && t.subtype === tag.subtype && t.timing === tag.timing
@@ -455,6 +475,49 @@ function resolveTapDraws(gs) {
   return tappedAny;
 }
 
+// ─── Opponent Phase ───────────────────────────────────────────────────────────
+
+/**
+ * Simulate opponent actions between our turns — draws and spell casts.
+ * Uses mock "spell" objects so existing matchesTriggerFilter logic handles filtering.
+ *
+ * Mock cards have only the `types` array needed for spell-type filter matching.
+ * Creature + noncreature are tracked separately; any-spell triggers fire both.
+ *
+ * @param {GameState} gs
+ * @param {StrategyConfig} strategy
+ */
+const _MOCK_OPPONENT_CREATURE    = { name: '', types: ['Creature'],  isCommander: false };
+const _MOCK_OPPONENT_NONCREATURE = { name: '', types: ['Sorcery'],   isCommander: false };
+
+function resolveOpponentPhase(gs, strategy) {
+  // Baseline: each opponent draws 1 card/turn. Extra draws are on top of that.
+  // Legacy saves may use opponentDrawsPerRound (treated as extra draws for compat).
+  const numOpponents    = strategy.numOpponents ?? 3;
+  const extraDraws      = strategy.opponentExtraDrawsPerRound ?? strategy.opponentDrawsPerRound ?? 0;
+  const drawReps        = numOpponents + extraDraws;
+  const creatureReps    = strategy.opponentCreatureSpellsPerRound    ?? 0;
+  const noncreatureReps = strategy.opponentNoncreatureSpellsPerRound ?? 0;
+
+  if (drawReps + creatureReps + noncreatureReps === 0) return;
+
+  for (let i = 0; i < drawReps; i++) {
+    resolveDrawEffects(gs, 'opponent_draw');
+    resolveLootEffects(gs, 'opponent_draw');
+    if (gs.deckedOut) return;
+  }
+  for (let i = 0; i < creatureReps; i++) {
+    resolveDrawEffects(gs, 'opponent_cast', null, _MOCK_OPPONENT_CREATURE);
+    resolveLootEffects(gs, 'opponent_cast', null, _MOCK_OPPONENT_CREATURE);
+    if (gs.deckedOut) return;
+  }
+  for (let i = 0; i < noncreatureReps; i++) {
+    resolveDrawEffects(gs, 'opponent_cast', null, _MOCK_OPPONENT_NONCREATURE);
+    resolveLootEffects(gs, 'opponent_cast', null, _MOCK_OPPONENT_NONCREATURE);
+    if (gs.deckedOut) return;
+  }
+}
+
 // ─── Greedy Cast Scoring ──────────────────────────────────────────────────────
 
 /**
@@ -466,7 +529,11 @@ function resolveTapDraws(gs) {
  */
 function effectiveCost(card, gs) {
   const spellFace = getMDFCSpellFace(card);
-  const base = spellFace ? (spellFace.cmc ?? card.cmc ?? 0) : (card.cmc ?? 0);
+  const baseCmc = spellFace ? (spellFace.cmc ?? card.cmc ?? 0) : (card.cmc ?? 0);
+  // Add user-configured X value for spells with {X} in their mana cost
+  const manaCost = spellFace?.manaCost ?? card.manaCost ?? '';
+  const xVal = manaCost.includes('{X}') ? (gs.xCosts?.[card.name] ?? 0) : 0;
+  const base = baseCmc + xVal;
   if (card.isCommander) return base + gs.commanderCastCount * 2;
   return base;
 }
@@ -521,7 +588,7 @@ function castScore(card, strategy) {
  */
 function simulateGame(flatDeck, strategy) {
   const library = shuffle([...flatDeck]);
-  const gs = initGameState(library, strategy.discardPriorities ?? []);
+  const gs = initGameState(library, strategy.discardPriorities ?? [], strategy.xCosts ?? {});
   const openingHand = [...gs.hand];
 
   for (let turn = 1; turn <= strategy.maxTurns; turn++) {
@@ -538,14 +605,48 @@ function simulateGame(flatDeck, strategy) {
     resolveLootEffects(gs, 'upkeep');
     if (gs.deckedOut) break;
 
+    // ── Opponent Phase ──────────────────────────────────────────────────────
+    // Simulate opponent draws/casts from their turns since we last untapped.
+    resolveOpponentPhase(gs, strategy);
+    if (gs.deckedOut) break;
+
     // ── Draw ───────────────────────────────────────────────────────────────
     if (turn === 1) {
       // In Commander, going first still draws (no skip-draw rule in goldfishing)
     }
+    // "At the beginning of your draw step" triggers fire before the normal draw.
+    resolveDrawEffects(gs, 'draw_step');
+    resolveLootEffects(gs, 'draw_step');
+    if (gs.deckedOut) break;
     if (!drawCard(gs)) break;
 
     // ── Mana ───────────────────────────────────────────────────────────────
-    gs.manaAvailable = gs.battlefield.filter(bf => isLand(bf.card)).length;
+    // Count mana from all untapped lands, then tap simulatable mana rocks.
+    // Lands are not individually marked tapped — they're tracked as a pool.
+    // Mana rocks are marked tapped so they don't also fire tap-draw abilities.
+    const landManaThisTurn = gs.battlefield.filter(bf => isLand(bf.card)).length;
+    let totalMana = landManaThisTurn;
+    let rockManaThisTurn = 0;
+    for (const bf of gs.battlefield) {
+      if (bf.tapped) continue;
+      const isCreatureCard = bf.card.types?.some(t => t.toLowerCase() === 'creature');
+      if (isCreatureCard && bf.turnEntered === turn) continue; // summoning sickness
+      const rockTag = bf.card.effectTags?.find(
+        t => t.tier === 'simulatable' && t.category === 'ramp' && t.subtype === 'mana_rock' && t.timing === 'tap'
+      );
+      if (rockTag) {
+        bf.tapped = true;
+        // Lands that also have a mana_rock tag (e.g. Command Tower, Exotic Orchard)
+        // are already counted in the land total above — don't add mana twice.
+        if (!isLand(bf.card)) {
+          const manaAdded = rockTag.value ?? 1;
+          totalMana += manaAdded;
+          rockManaThisTurn += manaAdded;
+        }
+      }
+    }
+    gs.manaAvailable = totalMana;
+    gs.currentTurnRecord.manaFromRocks = rockManaThisTurn;
 
     // ── Land ───────────────────────────────────────────────────────────────
     // Prefer pure lands. If none, choose the MDFC land-back whose spell face
@@ -573,6 +674,9 @@ function simulateGame(flatDeck, strategy) {
       resolveDrawEffects(gs, 'land_etb');
       resolveLootEffects(gs, 'land_etb');
     }
+
+    // Record mana AFTER land play so the land drop this turn is included
+    gs.currentTurnRecord.manaAvailable = gs.manaAvailable;
 
     // ── Main Phase ─────────────────────────────────────────────────────────
     // Interleaved tap-draw and casting: activate tap abilities, cast spells,
@@ -645,10 +749,19 @@ function simulateGame(flatDeck, strategy) {
           // Fire ETB effects — only newly entered card
           resolveDrawEffects(gs, 'etb', [bfEntry]);
           resolveLootEffects(gs, 'etb', [bfEntry]);
+          // Fire creature_etb watchers (e.g. Soul of the Harvest, Guardian Project).
+          // Exclude the entering creature itself from the watcher set — handles "another
+          // creature" semantics without needing to parse "another" from oracle text.
+          // Pass toCast as the entering creature so TriggerFilter (maxCmc, nontoken) applies.
+          if (castFaceTypes?.some(t => t.toLowerCase() === 'creature')) {
+            const watcherSubset = gs.battlefield.filter(bf => bf.card !== toCast);
+            resolveDrawEffects(gs, 'creature_etb', watcherSubset, toCast);
+            resolveLootEffects(gs, 'creature_etb', watcherSubset, toCast);
+          }
         } else {
           // Resolve the spell's own draw/loot effects on resolution
-          resolveDrawEffects(gs, 'passive', [{ card: toCast }]);
-          resolveLootEffects(gs, 'passive', [{ card: toCast }]);
+          resolveDrawEffects(gs, 'on_resolution', [{ card: toCast }]);
+          resolveLootEffects(gs, 'on_resolution', [{ card: toCast }]);
           gs.graveyard.push(toCast);
         }
 
@@ -660,6 +773,13 @@ function simulateGame(flatDeck, strategy) {
         if (gs.deckedOut) break;
       }
     }
+
+    // ── End Step ───────────────────────────────────────────────────────────
+    // Cards drawn at end step are available next turn (conservative).
+    // e.g. Jin-Gitaxias ("at the beginning of your end step, draw seven cards")
+    resolveDrawEffects(gs, 'end_step');
+    resolveLootEffects(gs, 'end_step');
+    if (gs.deckedOut) break;
 
     // ── Record ─────────────────────────────────────────────────────────────
     gs.turnHistory.push({ ...gs.currentTurnRecord });
@@ -796,11 +916,52 @@ function computeTurnBySummary(games, maxTurns) {
     drawEffectSourceBreakdown[name] = parseFloat((total / n).toFixed(2));
   }
 
+  // Mana available by turn (land + rocks combined)
+  const avgManaByTurn = {};
+  for (const snapTurn of SNAPSHOT_TURNS) {
+    let total = 0;
+    for (const { turnHistory } of games) {
+      const record = turnHistory.find(r => r.turn === snapTurn);
+      total += record?.manaAvailable ?? 0;
+    }
+    avgManaByTurn[snapTurn] = parseFloat((total / n).toFixed(2));
+  }
+
+  // Mana from rocks per game (total over all turns)
+  let totalRockMana = 0;
+  for (const { turnHistory } of games) {
+    for (const record of turnHistory) {
+      totalRockMana += record.manaFromRocks ?? 0;
+    }
+  }
+  const avgManaFromRocksPerGame = parseFloat((totalRockMana / n).toFixed(2));
+
+  // Missed land drops (turns where no land was played)
+  let totalMissedLands = 0;
+  // Ramp plays (non-land, non-MDFC cards with a mana_rock tag cast)
+  let totalRocksPlayed = 0;
+  for (const { turnHistory } of games) {
+    for (const record of turnHistory) {
+      if (record.landsPlayed.length === 0) totalMissedLands++;
+      totalRocksPlayed += record.spellsCast.filter(c =>
+        !c.isMDFC &&
+        !c.types?.some(t => t.toLowerCase() === 'land') &&
+        c.effectTags?.some(t => t.category === 'ramp' && t.subtype === 'mana_rock')
+      ).length;
+    }
+  }
+  const avgMissedLandDrops = parseFloat((totalMissedLands / n).toFixed(2));
+  const avgRocksPlayedPerGame = parseFloat((totalRocksPlayed / n).toFixed(2));
+
   return {
     avgCardsDrawnByTurn,
     avgEffectDrawsPerGame,
     pctGamesWithDrawEffect,
     drawEffectSourceBreakdown,
+    avgManaByTurn,
+    avgManaFromRocksPerGame,
+    avgMissedLandDrops,
+    avgRocksPlayedPerGame,
   };
 }
 
@@ -829,6 +990,7 @@ export function runSimulation(deck, gameCount = 1000, goodHandDefs = []) {
     ...DEFAULT_STRATEGY_CONFIG,
     ...(deck.strategyConfig || {}),
     discardPriorities: deck.discardPriorities || [],
+    xCosts: deck.xCosts || {},
   };
 
   let hands = [];
@@ -862,6 +1024,15 @@ export function runSimulation(deck, gameCount = 1000, goodHandDefs = []) {
     ...(isEnriched ? computeTurnBySummary(games, strategy.maxTurns) : {}),
   };
 
+  // Collect up to 3 sample good hands (hands that match at least one def, or any hand if no defs)
+  const sampleGoodHands = [];
+  for (const h of hands) {
+    if (sampleGoodHands.length >= 3) break;
+    const isGood = goodHandDefs.length === 0
+      || goodHandDefs.some(def => evaluateGoodHandDef(def, h.hand));
+    if (isGood) sampleGoodHands.push(h.hand);
+  }
+
   return {
     deckId: deck.id,
     deckName: deck.name,
@@ -869,6 +1040,7 @@ export function runSimulation(deck, gameCount = 1000, goodHandDefs = []) {
     simulatedAt: new Date().toISOString(),
     enriched: isEnriched,
     hands,   // Full raw data — useful for per-hand drill-down
+    sampleGoodHands,
     summary,
   };
 }

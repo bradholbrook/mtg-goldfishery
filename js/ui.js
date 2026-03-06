@@ -33,7 +33,10 @@ export function renderActiveDeck(deck, onRunSimulation, editingDef = null, activ
   container.innerHTML = `
     <div class="panel-header">
       <div>
-        <h2 class="deck-title">${escapeHtml(deck.name)}</h2>
+        <h2 class="deck-title">
+          ${escapeHtml(deck.name)}
+          <button class="btn-icon btn-rename" onclick="window.__deck.rename()" title="Rename deck">✏</button>
+        </h2>
         ${deck.commander
           ? `<div class="muted" style="margin-top:2px">Commander: <strong>${escapeHtml(deck.commander)}</strong></div>`
           : ''}

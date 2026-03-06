@@ -18,24 +18,6 @@ import { CARD_TYPES } from './types.js';
 
 export const CRITERION_TYPES = {
 
-  card_in_hand: {
-    id:    'card_in_hand',
-    label: 'Card in hand',
-    fields: [
-      { key: 'cardName', widget: 'card_select', label: 'Card' },
-    ],
-    defaultValues: () => ({ cardName: '' }),
-    evaluate(criterion, hand) {
-      if (!criterion.cardName) return false;
-      return hand.some(c => c.name === criterion.cardName);
-    },
-    describe(criterion) {
-      return criterion.cardName
-        ? `"${criterion.cardName}" in hand`
-        : '(select a card)';
-    },
-  },
-
   at_least_type: {
     id:    'at_least_type',
     label: 'At least N of type',
@@ -75,6 +57,52 @@ export const CRITERION_TYPES = {
         ? criterion.cardTypes.join(' or ')
         : '(no types)';
       return `≥${criterion.count || 1} of: ${types}`;
+    },
+  },
+
+  has_mana_rock: {
+    id:    'has_mana_rock',
+    label: 'Has mana rock(s)',
+    fields: [
+      { key: 'count', widget: 'number', label: 'Count', min: 1, max: 7 },
+      { key: 'maxMv', widget: 'mv_select', label: 'MV' },
+    ],
+    defaultValues: () => ({ count: 1, maxMv: 'any' }),
+    evaluate(criterion, hand) {
+      const maxMv = criterion.maxMv ?? 'any';
+      const n = hand.filter(c =>
+        !c.isMDFC &&
+        !c.types?.some(t => t.toLowerCase() === 'land') &&
+        c.effectTags?.some(t => t.category === 'ramp' && t.subtype === 'mana_rock') &&
+        (maxMv === 'any' || (c.cmc != null && c.cmc <= Number(maxMv)))
+      ).length;
+      return n >= (Number(criterion.count) || 1);
+    },
+    describe(criterion) {
+      const mv = criterion.maxMv && criterion.maxMv !== 'any' ? ` MV≤${criterion.maxMv}` : '';
+      return `≥${criterion.count || 1} mana rock${(criterion.count || 1) !== 1 ? 's' : ''}${mv}`;
+    },
+  },
+
+  n_of_cards: {
+    id:    'n_of_cards',
+    label: 'N of selected cards',
+    fields: [
+      { key: 'count',     widget: 'number',           label: 'Count', min: 1, max: 7 },
+      { key: 'cardNames', widget: 'cards_multiselect', label: 'Cards' },
+    ],
+    defaultValues: () => ({ count: 1, cardNames: [] }),
+    evaluate(criterion, hand) {
+      const names = Array.isArray(criterion.cardNames) ? criterion.cardNames : [];
+      if (!names.length) return false;
+      const n = hand.filter(c => names.includes(c.name)).length;
+      return n >= (Number(criterion.count) || 1);
+    },
+    describe(criterion) {
+      const names = Array.isArray(criterion.cardNames) && criterion.cardNames.length
+        ? criterion.cardNames.join(' / ')
+        : '(no cards selected)';
+      return `≥${criterion.count || 1} of: ${names}`;
     },
   },
 

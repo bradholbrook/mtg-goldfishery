@@ -72,36 +72,6 @@ describe('at_least_type criterion', () => {
 
 });
 
-// ── card_in_hand ──────────────────────────────────────────────────────────────
-
-describe('card_in_hand criterion', () => {
-
-  it('passes when the named card is present in hand', () => {
-    const hand = [makeCard({ name: 'Sol Ring' }), LAND];
-    const criterion = { type: 'card_in_hand', cardName: 'Sol Ring' };
-    assert.equal(evaluateGoodHandDef(makeGoodHandDef([criterion]), hand), true);
-  });
-
-  it('fails when the named card is absent from hand', () => {
-    const hand = [LAND, CREATURE_2];
-    const criterion = { type: 'card_in_hand', cardName: 'Sol Ring' };
-    assert.equal(evaluateGoodHandDef(makeGoodHandDef([criterion]), hand), false);
-  });
-
-  it('fails when cardName is empty string', () => {
-    const hand = [LAND];
-    const criterion = { type: 'card_in_hand', cardName: '' };
-    assert.equal(evaluateGoodHandDef(makeGoodHandDef([criterion]), hand), false);
-  });
-
-  it('is case-sensitive (exact name match)', () => {
-    const hand = [makeCard({ name: 'Sol Ring' })];
-    const criterion = { type: 'card_in_hand', cardName: 'sol ring' };
-    assert.equal(evaluateGoodHandDef(makeGoodHandDef([criterion]), hand), false);
-  });
-
-});
-
 // ── at_least_n_of_types ───────────────────────────────────────────────────────
 
 describe('at_least_n_of_types criterion', () => {
@@ -183,10 +153,10 @@ describe('evaluateGoodHandDef AND logic', () => {
 
 describe('CRITERION_TYPES registry', () => {
 
-  it('contains at_least_type, card_in_hand, at_least_n_of_types', () => {
+  it('contains at_least_type, at_least_n_of_types, n_of_cards', () => {
     assert.ok('at_least_type' in CRITERION_TYPES);
-    assert.ok('card_in_hand' in CRITERION_TYPES);
     assert.ok('at_least_n_of_types' in CRITERION_TYPES);
+    assert.ok('n_of_cards' in CRITERION_TYPES);
   });
 
   it('each entry has id, label, fields, defaultValues, evaluate, describe', () => {
@@ -205,6 +175,22 @@ describe('CRITERION_TYPES registry', () => {
       const defaults = entry.defaultValues();
       assert.ok(defaults && typeof defaults === 'object', `${key}.defaultValues() should return an object`);
     }
+  });
+
+  it('describe() returns a non-empty string with real values', () => {
+    assert.equal(
+      CRITERION_TYPES.at_least_type.describe({ count: 2, cardType: 'Land' }),
+      '≥2 Land',
+    );
+    assert.equal(
+      CRITERION_TYPES.at_least_n_of_types.describe({ count: 1, cardTypes: ['Land', 'Creature'] }),
+      '≥1 of: Land or Creature',
+    );
+  });
+
+  it('describe() handles missing/empty values gracefully', () => {
+    const desc = CRITERION_TYPES.at_least_n_of_types.describe({ count: 1, cardTypes: [] });
+    assert.ok(desc.includes('no types'), `expected "(no types)" in "${desc}"`);
   });
 
 });

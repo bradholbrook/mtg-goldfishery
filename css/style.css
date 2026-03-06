@@ -21,8 +21,8 @@
 
   /* Text */
   --text-primary: #e8eaf0;
-  --text-secondary: #8b92a8;
-  --text-muted: #545d73;
+  --text-secondary: #a4adc4;
+  --text-muted: #6e7a96;
 
   /* Accent — mana gold */
   --accent: #f0b429;
@@ -483,6 +483,9 @@ textarea.input-text {
   align-items: center;
   gap: 10px;
 }
+.hand-chart-row--with-btn {
+  grid-template-columns: 140px auto 1fr 48px 60px;
+}
 
 .hand-chart-seen {
   font-size: 12px;
@@ -721,15 +724,49 @@ textarea.input-text {
 /* ─── Good Hand Definitions ─────────────────────────────────── */
 
 .def-item {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 8px 10px;
   background: var(--bg-2);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   margin-bottom: 6px;
+  position: relative;
+}
+
+.def-item--clickable {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+  user-select: none;
+}
+.def-item--clickable:hover { background: var(--bg-3); border-color: var(--border-bright); }
+
+.def-item--expanded { border-color: var(--border-bright); }
+
+.def-item-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.1s;
+}
+.def-item-header:hover { background: var(--bg-3); }
+
+.def-item-chevron {
+  font-size: 9px;
+  color: var(--text-muted);
+  width: 14px;
+  flex-shrink: 0;
+  text-align: center;
+}
+
+.def-editor {
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  margin: 0;
 }
 
 .def-item-info {
@@ -737,6 +774,7 @@ textarea.input-text {
   flex-direction: column;
   gap: 2px;
   min-width: 0;
+  flex: 1;
 }
 
 .def-item-name {
@@ -779,10 +817,7 @@ textarea.input-text {
 
 .def-editor {
   background: var(--bg-2);
-  border: 1px solid var(--border-bright);
-  border-radius: var(--radius-lg);
   padding: 14px;
-  margin-bottom: 10px;
   display: flex;
   flex-direction: column;
   gap: 12px;
@@ -985,12 +1020,12 @@ textarea.input-text {
 #card-image-preview {
   position: fixed;
   display: none;
-  z-index: 500;
+  z-index: 1100;
   pointer-events: none;
   gap: 6px;
 }
 #card-image-preview img {
-  width: 200px;
+  width: 250px;
   border-radius: 12px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.8);
   display: block;
@@ -1002,7 +1037,7 @@ textarea.input-text {
   display: flex;
 }
 #card-image-preview.dual img {
-  width: 185px;
+  width: 231px;
   display: block;
 }
 .card-effect-image--dual {
@@ -1122,4 +1157,126 @@ textarea.input-text {
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
+}
+
+/* ─── Cards Multiselect Dropdown ────────────────────────────────────────────── */
+.card-multiselect-dropdown {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+
+.card-multiselect-toggle {
+  display: flex;
+  align-items: center;
+  background: var(--bg-3);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  padding: 5px 10px;
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+  width: 100%;
+  box-sizing: border-box;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.card-multiselect-toggle::-webkit-details-marker { display: none; }
+.card-multiselect-toggle::after { content: ' ▾'; color: var(--text-muted); margin-left: 4px; }
+.card-multiselect-dropdown[open] .card-multiselect-toggle::after { content: ' ▴'; }
+
+.card-option--selected { color: var(--accent); }
+.card-option-check { display: inline-block; width: 14px; flex-shrink: 0; }
+
+.card-multiselect-list {
+  position: absolute;
+  z-index: 200;
+  top: calc(100% + 4px);
+  left: 0;
+  min-width: 220px;
+  max-height: 300px;
+  overflow-y: auto;
+  background: var(--bg-3);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  box-shadow: 0 8px 24px rgba(0,0,0,0.5);
+}
+
+/* ─── Deck Rename Button ─────────────────────────────────────────────────────── */
+.btn-rename {
+  font-size: 12px;
+  opacity: 0.4;
+  vertical-align: middle;
+  margin-left: 4px;
+}
+.btn-rename:hover { opacity: 1; color: var(--accent); }
+
+/* ─── Sample Hands Modal ─────────────────────────────────────────────────────── */
+.hands-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0,0,0,0.75);
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.hands-modal {
+  background: var(--bg-2);
+  border: 1px solid var(--border-bright);
+  border-radius: var(--radius-lg);
+  max-width: 700px;
+  width: 95vw;
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.hands-modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 14px 16px;
+  border-bottom: 1px solid var(--border);
+  font-weight: 600;
+  font-size: 13px;
+  position: sticky;
+  top: 0;
+  background: var(--bg-2);
+}
+
+.hands-modal-body {
+  padding: 12px;
+  display: flex;
+  flex-direction: row;
+  gap: 8px;
+  align-items: flex-start;
+}
+
+.hand-column {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-1);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.hand-column-header {
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  padding: 8px 10px 6px;
+  border-bottom: 1px solid var(--border);
 }

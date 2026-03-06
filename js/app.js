@@ -6,21 +6,23 @@
  */
 
 import { parseMoxfieldDecklist, parseMoxfieldApiResponse } from './parser.js';
-import { runSimulation } from './simulator.js';
+import { runSimulation, flattenDeck } from './simulator.js';
 import {
   addDeck, removeDeck, addResults,
   getDeckById, saveToFile, loadFromFile,
   updateDeckGoodHandDefs, removeGoodHandDef,
   updateDeckDiscardPriorities,
+  updateDeckXCost,
+  renameDeck,
 } from './storage.js';
 import {
   renderDeckList, renderActiveDeck, showToast,
-  setImportLoading,
+  setImportLoading, TYPE_COLORS,
 } from './ui.js';
 import { generateId } from './types.js';
-import { CRITERION_TYPES } from './criteria.js';
+import { CRITERION_TYPES, evaluateGoodHandDef } from './criteria.js';
 import { enrichDeckWithScryfall } from './enrichment.js';
-import { EFFECT_TYPES, EFFECT_TYPE_OPTIONS } from './effect-types.js';
+import { EFFECT_TYPES, EFFECT_TYPE_OPTIONS, resolveCastFilter } from './effect-types.js';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -52,6 +54,13 @@ document.addEventListener('DOMContentLoaded', () => {
   bindImportPanel();
   bindSaveLoad();
   refresh();
+
+  // Close card multiselect dropdowns when clicking outside them
+  document.addEventListener('click', e => {
+    if (!e.target.closest('.card-multiselect-dropdown')) {
+      document.querySelectorAll('.card-multiselect-dropdown[open]').forEach(el => el.removeAttribute('open'));
+    }
+  });
 });
 
 // ─── Refresh (re-render everything from state) ────────────────────────────────
@@ -250,11 +259,25 @@ function freshCriterion() {
 window.__ghh = {
 
   addDef() {
-    editingDef = { defId: null, name: '', criteria: [freshCriterion()] };
+    const deck = getDeckById(activeDeckId);
+    const hasNoDefs = !deck?.goodHandDefs?.length;
+    editingDef = {
+      defId: null,
+      name: hasNoDefs ? 'Keepable Hand' : '',
+      criteria: hasNoDefs
+        ? [{ type: 'at_least_type', count: 2, cardType: 'Land' }]
+        : [freshCriterion()],
+    };
     refresh();
   },
 
   editDef(defId) {
+    // Toggle: collapse if already expanded
+    if (editingDef?.defId === defId) {
+      editingDef = null;
+      refresh();
+      return;
+    }
     const deck = getDeckById(activeDeckId);
     const def = deck?.goodHandDefs?.find(d => d.id === defId);
     if (!def) return;
@@ -274,9 +297,14 @@ window.__ghh = {
     if (!editingDef) return;
     // Read name directly from DOM as safety net (oninput may not fire on rapid click)
     const nameEl = document.getElementById('def-name-input');
-    const name = (nameEl?.value ?? editingDef.name).trim();
-    if (!name) { showToast('Give this definition a name.', 'warn'); return; }
+    let name = (nameEl?.value ?? editingDef.name).trim();
     if (!editingDef.criteria.length) { showToast('Add at least one criterion.', 'warn'); return; }
+    // Auto-generate name from first criterion if blank
+    if (!name) {
+      const firstCrit = editingDef.criteria[0];
+      const typeInfo = CRITERION_TYPES[firstCrit.type];
+      name = typeInfo ? typeInfo.describe(firstCrit) : 'Good Hand';
+    }
 
     const deck = getDeckById(activeDeckId);
     if (!deck) return;
@@ -334,10 +362,56 @@ window.__ghh = {
     refresh();
   },
 
+  /** Toggle a card name in/out of a criterion's cardNames array. */
+  toggleCard(idx, cardName) {
+    if (!editingDef?.criteria[idx]) return;
+    const current = editingDef.criteria[idx].cardNames || [];
+    editingDef.criteria[idx].cardNames = current.includes(cardName)
+      ? current.filter(n => n !== cardName)
+      : [...current, cardName];
+    // Update the dropdown summary text without a full re-render
+    const count = editingDef.criteria[idx].cardNames.length;
+    const summary = document.querySelector(`[data-crit-idx="${idx}"] .card-multiselect-toggle`);
+    if (summary) {
+      summary.textContent = count > 0
+        ? `${count} card${count !== 1 ? 's' : ''} selected`
+        : 'Select cards…';
+    }
+  },
+
   /** Update the definition name — no re-render needed */
   setName(val) {
     if (!editingDef) return;
     editingDef.name = val;
+  },
+
+  /** Generate up to 3 sample hands that satisfy a specific good hand def and show them. */
+  sampleDef(defId) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    const def = deck.goodHandDefs?.find(d => d.id === defId);
+    if (!def) return;
+
+    const flat = flattenDeck(deck);
+    const samples = [];
+    const MAX_ATTEMPTS = 2000;
+
+    for (let attempt = 0; attempt < MAX_ATTEMPTS && samples.length < 3; attempt++) {
+      // Fisher-Yates shuffle
+      const lib = [...flat];
+      for (let i = lib.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [lib[i], lib[j]] = [lib[j], lib[i]];
+      }
+      const hand = lib.slice(0, 7);
+      if (evaluateGoodHandDef(def, hand)) samples.push(hand);
+    }
+
+    if (!samples.length) {
+      showToast('No matching hands found — criteria may be very restrictive.', 'warn');
+      return;
+    }
+    window.__hands.show(samples);
   },
 };
 
@@ -390,6 +464,30 @@ window.__disc = {
     updateDeckDiscardPriorities(deck.id, priorities);
     this._dragSrc = null;
     refresh();
+  },
+};
+
+// ─── X Spell Value Actions ────────────────────────────────────────────────────
+
+window.__xcosts = {
+  set(cardName, value) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    updateDeckXCost(deck.id, cardName, Math.max(0, Math.floor(value) || 0));
+    // No refresh — input is live
+  },
+};
+
+// ─── Opponent Profile Actions ─────────────────────────────────────────────────
+
+window.__opp = {
+  set(field, value) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    if (!deck.strategyConfig) deck.strategyConfig = {};
+    const min = field === 'numOpponents' ? 1 : 0;
+    deck.strategyConfig[field] = Math.max(min, Math.floor(value) || min);
+    // No refresh — input is live
   },
 };
 
@@ -446,6 +544,8 @@ window.__eff = {
       ...(typeInfo?.defaultValues() ?? {}),
       // Inherit the auto-detected value so the override starts accurate
       value:         autoTag.value,
+      // Inherit trigger filter so override reflects the detected spell/death filter
+      triggerFilter: autoTag.triggerFilter ?? null,
     });
     refresh();
   },
@@ -538,14 +638,14 @@ window.__eff = {
     refresh();
   },
 
-  /** Change the timing of a user addition tag. */
+  /** Change the timing of a user addition tag. Re-renders to show/hide trigger filter widgets. */
   setTiming(cardName, tagIdx, timing) {
     const card = getCardByName(cardName);
     if (!card) return;
     const tag = card.effectTags[tagIdx];
     if (!tag || tag.source !== 'user') return;
     tag.timing = timing;
-    // Timing change doesn't alter which fields are shown — no re-render
+    refresh();
   },
 
   /** Toggle tier for a conditional user tag. Re-renders to show/hide EV input. */
@@ -556,6 +656,25 @@ window.__eff = {
     if (!tag || tag.source !== 'user') return;
     tag.tier = tier;
     refresh();
+  },
+
+  /** Set the cast spell-type filter on a user tag. */
+  setCastFilter(cardName, tagIdx, key) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    const tag = card.effectTags[tagIdx];
+    if (!tag || tag.source !== 'user') return;
+    tag.triggerFilter = resolveCastFilter(key);
+  },
+
+  /** Set the death subject filter on a user tag. */
+  setDeathSubject(cardName, tagIdx, key) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    const tag = card.effectTags[tagIdx];
+    if (!tag || tag.source !== 'user') return;
+    if (!tag.triggerFilter) tag.triggerFilter = {};
+    tag.triggerFilter.deathSubject = key;
   },
 
 };
@@ -632,6 +751,78 @@ window.__ovr = {
       expandedTypeGroups.add(type);
     }
     refresh();
+  },
+};
+
+// ─── Sample Good Hands Popup ──────────────────────────────────────────────────
+
+// Type priority for sorting cards in sample hand display (index = sort key)
+const HAND_TYPE_PRIORITY = ['Creature', 'Sorcery', 'Instant', 'Artifact', 'Enchantment', 'Planeswalker', 'Battle', 'MDFC', 'Other', 'Land'];
+
+function handCardPrimaryType(card) {
+  if (!Array.isArray(card.types)) return 'Other';
+  for (const t of HAND_TYPE_PRIORITY) {
+    if (card.types.includes(t)) return t;
+  }
+  return 'Other';
+}
+
+window.__hands = {
+  show(rawHands) {
+    const sampleGoodHands = rawHands ?? window.__currentSampleHands ?? [];
+    if (!sampleGoodHands.length) return;
+    document.querySelector('.hands-modal-overlay')?.remove();
+
+    const handsHTML = sampleGoodHands.map((hand, i) => {
+      const sorted = [...hand].sort((a, b) =>
+        HAND_TYPE_PRIORITY.indexOf(handCardPrimaryType(a)) - HAND_TYPE_PRIORITY.indexOf(handCardPrimaryType(b))
+      );
+      const cardsHTML = sorted.map(card => {
+        const imgAttr  = card.imageUrl     ? `data-image-url="${card.imageUrl.replace(/"/g, '&quot;')}"` : '';
+        const backAttr = card.backImageUrl ? `data-back-image-url="${card.backImageUrl.replace(/"/g, '&quot;')}"` : '';
+        const cardType  = handCardPrimaryType(card);
+        const typeColor = TYPE_COLORS[cardType] || TYPE_COLORS.Other;
+        const safeName  = card.name.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        return `<div class="card-row card-row--clickable" style="padding:4px 8px"
+          ${imgAttr} ${backAttr}
+          onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
+          onmouseleave="window.__preview?.hide()">
+          <span class="legend-dot" style="background:${typeColor};flex-shrink:0"></span>
+          <span class="card-row-name">${safeName}</span>
+        </div>`;
+      }).join('');
+      return `<div class="hand-column">
+        <div class="hand-column-header">Hand ${i + 1}</div>
+        ${cardsHTML}
+      </div>`;
+    }).join('');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'hands-modal-overlay';
+    overlay.innerHTML = `
+      <div class="hands-modal">
+        <div class="hands-modal-header">
+          <span>Sample Good Opening Hands</span>
+          <button class="btn-icon" onclick="this.closest('.hands-modal-overlay').remove()">✕</button>
+        </div>
+        <div class="hands-modal-body">${handsHTML}</div>
+      </div>`;
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  },
+};
+
+// ─── Deck Rename ──────────────────────────────────────────────────────────────
+
+window.__deck = {
+  rename() {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    const newName = prompt('Rename deck:', deck.name)?.trim();
+    if (newName) {
+      renameDeck(deck.id, newName);
+      refresh();
+    }
   },
 };
 

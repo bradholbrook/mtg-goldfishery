@@ -1,5 +1,5 @@
 import { CARD_TYPES } from '../types.js';
-import { EFFECT_TYPES, EFFECT_TYPE_OPTIONS } from '../effect-types.js';
+import { EFFECT_TYPES, EFFECT_TYPE_OPTIONS, TIMING_LABELS, CAST_FILTER_OPTIONS, getCastFilterKey } from '../effect-types.js';
 import { TYPE_COLORS, escapeHtml } from './shared.js';
 
 export function buildCardsTab(deck, expandedEffectCards = new Set(), expandedTypeGroups = new Set()) {
@@ -43,17 +43,22 @@ function buildCardRow(card, expandedEffectCards = new Set()) {
   const userOverriddenKeys = new Set(
     allTags.filter(t => t.source === 'user').map(t => `${t.subtype}:${t.timing}`)
   );
+  const isPureLand = card.types?.every(t => t.toLowerCase() === 'land' || t.toLowerCase() === 'mdfc');
   const chips = allTags
     .filter(t => t.tier !== 'skip')
     .filter(t => !(t.source === 'auto' && userOverriddenKeys.has(`${t.subtype}:${t.timing}`)))
+    // mana_rock on a land or MDFC is handled by the land pool — don't show it as a chip
+    .filter(t => !(t.subtype === 'mana_rock' && (isPureLand || card.isMDFC) && t.source === 'auto'))
     .map(t => {
       const typeInfo = EFFECT_TYPES[t.subtype];
       const base = typeInfo
         ? typeInfo.describe(t)
         : (t.value != null ? `${t.category}·${t.timing}·${t.value}` : `${t.category}·${t.timing}`);
-      const label = t.tier === 'track_only' ? `${base} (track)` : base;
+      const baseWithFilter = base + describeTriggerFilter(t.triggerFilter);
+      const label = t.tier === 'track_only' ? `${baseWithFilter} (track)` : baseWithFilter;
       const sourceClass = t.source === 'user' ? ' effect-chip--user' : '';
-      return `<span class="effect-chip effect-chip--${t.tier}${sourceClass}">${label}</span>`;
+      const tierClass = t.tier === 'simulatable_soon' ? 'track_only' : t.tier;
+      return `<span class="effect-chip effect-chip--${tierClass}${sourceClass}">${label}</span>`;
     }).join('');
   const cmc = card.cmc != null
     ? `<span class="card-row-cmc">${card.cmc}</span>`
@@ -64,13 +69,13 @@ function buildCardRow(card, expandedEffectCards = new Set()) {
     <div class="card-row-wrapper">
       <div class="card-row card-row--clickable"
            data-card-name="${escapeHtml(card.name)}"
-           data-image-url="${escapeHtml(card.imageUrl || '')}"
-           data-back-image-url="${escapeHtml(card.backImageUrl || '')}"
-           onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
-           onmouseleave="window.__preview?.hide()"
            onclick="window.__eff.toggle(this.dataset.cardName)">
         <span class="card-row-qty muted">${card.quantity}×</span>
-        <span class="card-row-name">${escapeHtml(card.name)}</span>
+        <span class="card-row-name"
+              data-image-url="${escapeHtml(card.imageUrl || '')}"
+              data-back-image-url="${escapeHtml(card.backImageUrl || '')}"
+              onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
+              onmouseleave="window.__preview?.hide()">${escapeHtml(card.name)}</span>
         <span class="card-row-tags">${chips}</span>
         ${cmc}
         ${chevron}
@@ -184,15 +189,32 @@ function buildCardEffectEditor(card) {
 }
 
 /**
+ * Return a short human-readable description of a TriggerFilter, or empty string.
+ * Used to annotate auto-detected chips when a spell/death filter was detected.
+ */
+function describeTriggerFilter(tf) {
+  if (!tf) return '';
+  if (tf.isCommander) return ' [commander]';
+  if (tf.deathSubject === 'self') return ' [self]';
+  if (tf.deathSubject === 'any_creature') return ' [any creature]';
+  if (tf.excludeTypes?.includes('Creature')) return ' [noncreature]';
+  if (tf.spellTypes?.includes('Instant') && tf.spellTypes?.includes('Sorcery')) return ' [instant/sorcery]';
+  if (tf.spellTypes?.length === 1) return ` [${tf.spellTypes[0].toLowerCase()}]`;
+  return '';
+}
+
+/**
  * Render an auto-detected tag as a chip + "Override" button.
  * Shown when no user override exists for this (subtype, timing).
  */
 function buildAutoTagRow(autoTag, cardNameAttr) {
   const typeInfo = EFFECT_TYPES[autoTag.subtype];
-  const label = typeInfo ? typeInfo.describe(autoTag) : `${autoTag.subtype}·${autoTag.timing}`;
+  const baseLabel = typeInfo ? typeInfo.describe(autoTag) : `${autoTag.subtype}·${autoTag.timing}`;
+  const filterSuffix = describeTriggerFilter(autoTag.triggerFilter);
+  const label = baseLabel + filterSuffix;
   return `
     <div class="effect-auto-row">
-      <span class="effect-chip effect-chip--${autoTag.tier}">${label}</span>
+      <span class="effect-chip effect-chip--${autoTag.tier === 'simulatable_soon' ? 'track_only' : autoTag.tier}">${label}</span>
       <button class="btn-effect-override"
         data-card-name="${cardNameAttr}"
         data-subtype="${autoTag.subtype}"
@@ -216,6 +238,7 @@ function buildOverrideRow(autoTag, userTag, fullIdx, cardNameAttr) {
         <span class="effect-override-label">${escapeHtml(userTag.subtype)} @ ${escapeHtml(userTag.timing)}</span>
         <span class="muted" style="font-size:11px" title="Auto-detected value">orig: ${escapeHtml(originalDesc)}</span>
         ${buildTierControls(userTag, fullIdx, cardNameAttr)}
+        ${buildTriggerFilterWidgets(userTag, fullIdx, cardNameAttr)}
       </div>
       <button class="btn-secondary btn-sm" data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
         onclick="window.__eff.remove(this.dataset.cardName, Number(this.dataset.tagIdx))"
@@ -243,13 +266,13 @@ function buildUserAdditionRow(tag, fullIdx, cardNameAttr, isPermanent, autoCover
 
   const typeInfo = EFFECT_TYPES[tag.subtype];
   // Exclude timings already covered by an auto tag for this subtype
-  const validTimings = (typeInfo?.validTimings ?? ['etb', 'upkeep', 'cast', 'tap', 'death', 'passive'])
+  const validTimings = (typeInfo?.validTimings ?? ['etb', 'upkeep', 'cast', 'tap', 'death', 'on_resolution'])
     .filter(tm => !autoCoveredKeys.has(`${tag.subtype}:${tm}`));
   const timingSelect = `
     <select class="select select-sm" data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
       onchange="window.__eff.setTiming(this.dataset.cardName, Number(this.dataset.tagIdx), this.value)">
       ${validTimings.map(tm =>
-        `<option value="${tm}" ${tm === tag.timing ? 'selected' : ''}>${tm}</option>`
+        `<option value="${tm}" ${tm === tag.timing ? 'selected' : ''}>${TIMING_LABELS[tm] ?? tm}</option>`
       ).join('')}
     </select>`;
 
@@ -263,12 +286,45 @@ function buildUserAdditionRow(tag, fullIdx, cardNameAttr, isPermanent, autoCover
         ${subtypeSelect}
         ${timingSelect}
         ${fieldWidgets}
+        ${buildTriggerFilterWidgets(tag, fullIdx, cardNameAttr)}
         ${buildTierControls(tag, fullIdx, cardNameAttr)}
       </div>
       <button class="btn-icon btn-danger effect-tag-remove" data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
         onclick="window.__eff.remove(this.dataset.cardName, Number(this.dataset.tagIdx))"
         title="Remove">✕</button>
     </div>`;
+}
+
+/**
+ * Render optional TriggerFilter widgets for cast and death timings.
+ * Returns empty string for other timings.
+ */
+function buildTriggerFilterWidgets(tag, tagIdx, cardNameAttr) {
+  if (tag.timing === 'cast' || tag.timing === 'opponent_cast') {
+    const current = getCastFilterKey(tag.triggerFilter ?? null);
+    // 'commander' only applies to your own casts, not opponent's
+    const options = tag.timing === 'opponent_cast'
+      ? CAST_FILTER_OPTIONS.filter(o => o.key !== 'commander')
+      : CAST_FILTER_OPTIONS;
+    const opts = options.map(o =>
+      `<option value="${o.key}" ${o.key === current ? 'selected' : ''}>${o.label}</option>`
+    ).join('');
+    return `<label class="effect-field-label">Spell filter
+      <select class="select select-sm" data-card-name="${cardNameAttr}" data-tag-idx="${tagIdx}"
+        onchange="window.__eff.setCastFilter(this.dataset.cardName, Number(this.dataset.tagIdx), this.value)">
+        ${opts}
+      </select></label>`;
+  }
+  if (tag.timing === 'death') {
+    const current = tag.triggerFilter?.deathSubject ?? 'any_creature';
+    return `<label class="effect-field-label">Trigger on
+      <select class="select select-sm" data-card-name="${cardNameAttr}" data-tag-idx="${tagIdx}"
+        onchange="window.__eff.setDeathSubject(this.dataset.cardName, Number(this.dataset.tagIdx), this.value)">
+        <option value="any_creature" ${current === 'any_creature' ? 'selected' : ''}>Any creature</option>
+        <option value="self"         ${current === 'self'         ? 'selected' : ''}>Self only</option>
+      </select></label>`;
+  }
+  return '';
 }
 
 /**
@@ -283,13 +339,18 @@ function buildTierControls(tag, fullIdx, cardNameAttr) {
       <option value="track_only"  ${tag.tier === 'track_only'  ? 'selected' : ''}>Track only</option>
       <option value="simulatable" ${tag.tier === 'simulatable' ? 'selected' : ''}>Simulate</option>
     </select>`;
+  // EV is only meaningful when the tag is actively simulated.
+  // on_resolution fires once per cast; other timings fire per trigger event.
+  const evLabel = tag.timing === 'on_resolution' ? 'Draws on cast' : 'Draws/trigger';
   const evInput = tag.tier === 'simulatable'
-    ? `<input type="number" class="input-number" style="width:64px"
-        value="${tag.expectedValue ?? ''}" step="1" min="0" max="20"
-        placeholder="EV"
-        data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}" data-field-key="expectedValue"
-        oninput="window.__eff.setField(this.dataset.cardName, Number(this.dataset.tagIdx), this.dataset.fieldKey, this.value === '' ? null : Math.floor(Number(this.value)))"
-        title="Expected value per trigger in sim" />`
+    ? `<label class="effect-field-label">${evLabel}
+        <input type="number" class="input-number" style="width:52px"
+          value="${tag.expectedValue ?? ''}" step="1" min="0" max="20"
+          placeholder="${tag.value ?? 1}"
+          data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}" data-field-key="expectedValue"
+          oninput="window.__eff.setField(this.dataset.cardName, Number(this.dataset.tagIdx), this.dataset.fieldKey, this.value === '' ? null : Math.floor(Number(this.value)))"
+          title="How many cards to draw each time this effect fires. Blank = use auto-detected value." />
+      </label>`
     : '';
   return tierSelect + evInput;
 }
