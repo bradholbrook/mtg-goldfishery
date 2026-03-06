@@ -57,6 +57,12 @@ export function addDeck(deck) {
   }
 }
 
+export function renameDeck(deckId, newName) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.name = newName.trim() || deck.name;
+}
+
 export function removeDeck(deckId) {
   appState.decks = appState.decks.filter(d => d.id !== deckId);
   // Optionally keep results for deleted decks (they reference deckId)
@@ -212,6 +218,23 @@ export function removeGoodHandDef(deckId, defId) {
   const deck = appState.decks.find(d => d.id === deckId);
   if (!deck?.goodHandDefs) return;
   deck.goodHandDefs = deck.goodHandDefs.filter(d => d.id !== defId);
+}
+
+// ─── X Costs ──────────────────────────────────────────────────────────────────
+
+/**
+ * Merge an individual X cost update into the deck's xCosts map.
+ * Pass value=null to remove an entry.
+ */
+export function updateDeckXCost(deckId, cardName, value) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  if (!deck.xCosts) deck.xCosts = {};
+  if (value === null || value === undefined) {
+    delete deck.xCosts[cardName];
+  } else {
+    deck.xCosts[cardName] = value;
+  }
 }
 
 // ─── Discard Priorities ───────────────────────────────────────────────────────

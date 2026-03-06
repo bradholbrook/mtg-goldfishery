@@ -90,11 +90,13 @@ Version `"2.0"` (`CURRENT_SAVE_VERSION` in `js/types.js`). Bump + migrate in `st
 
 ### Simulation
 
-Turn loop: **Untap → Upkeep → Draw → Mana → Land (+ land_etb) → Tap Draw → Cast (+ cast triggers) → Record**
+Turn loop: **Untap → Upkeep → Draw → Mana (lands + mana rocks) → Land (+ land_etb) → Tap Draw → Cast (+ cast triggers) → End Step → Record**
 
 `runSimulation(deck, gameCount, goodHandDefs)` — no DOM/localStorage.
 
 Phase 1 fires `tier: 'simulatable'` effects only. Cards drawn mid-turn available next turn (conservative).
+
+Mana rocks with a simulatable `mana_rock` tag are tapped automatically in the Mana phase and add their `value` to `gs.manaAvailable`. Lands are counted but not individually marked tapped (pool model).
 
 ### Test Suite
 
@@ -107,8 +109,8 @@ node --test tests/*.test.js   # Node 18+, no npm install
 
 | Phase | Scope |
 |-------|-------|
-| 1 ✓ | Scryfall enrichment, ETB/upkeep draw-1, turn loop, MDFC support, loot/discard, cast triggers |
-| 2 | Ramp (mana rocks, land fetch), multi-draw ETB, mana curve stats |
+| 1 ✓ | Scryfall enrichment, ETB/upkeep/end-step draw, turn loop, MDFC support, loot/discard, cast triggers, mana rock simulation |
+| 2 | Land ramp simulation (Cultivate etc.), multi-draw ETB condition filters, mana curve stats |
 | 3 | London Mulligan (keep rule = GoodHandDef criteria) |
 | 4 | Tutor simulation with priority target list |
 | 5 | Win condition tracking (pieces assembled by turn N) |

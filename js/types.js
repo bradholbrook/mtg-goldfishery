@@ -24,6 +24,8 @@
  * @property {CardFace[]|null} [faces]     - Per-face data for MDFCs; null for single-faced cards
  * @property {string|null}  [imageUrl]     - Scryfall 'normal' image URL for the front face
  * @property {string|null}  [backImageUrl] - Scryfall 'normal' image URL for the back face (MDFCs only)
+ * @property {string|null}  [power]        - Creature power (string e.g. "3", "*")
+ * @property {string|null}  [toughness]    - Creature toughness
  */
 
 /**
@@ -32,9 +34,15 @@
  * null means "any spell / no filter".
  *
  * @typedef {Object} TriggerFilter
- * @property {string[]|null} spellTypes    - CARD_TYPES values that must match (null = any spell)
- * @property {string[]|null} [excludeTypes] - CARD_TYPES values that disqualify (e.g. noncreature)
- * @property {boolean}       [isCommander] - only fire when your commander is cast
+ * @property {string[]|null}              spellTypes    - Cast: CARD_TYPES values that must match (null = any spell)
+ * @property {string[]|null}              [excludeTypes] - Cast: CARD_TYPES values that disqualify (e.g. noncreature)
+ * @property {boolean}                    [isCommander] - Cast: only fire when your commander is cast
+ * @property {'self'|'any_creature'|null} [deathSubject] - Death: what must die (null = no filter; track_only, not evaluated in sim)
+ * @property {string[]|null}              [deathTypes]  - Death: creature subtype filter (future use)
+ * @property {number|null}                [minCmc]      - Cast/ETB: minimum CMC of the spell/creature
+ * @property {number|null}                [maxCmc]      - Cast/ETB: maximum CMC of the spell/creature
+ * @property {number|null}                [maxPower]    - ETB: maximum power of the entering creature
+ * @property {boolean}                    [nontoken]    - ETB: only non-token creatures trigger
  */
 
 /**
@@ -44,14 +52,14 @@
  * @typedef {Object} EffectTag
  * @property {'draw'|'ramp'|'tutor'|'removal'|'token'|'other'} category
  * @property {string}   subtype        - e.g. 'draw_n', 'loot', 'land_fetch', 'add_mana_tap'
- * @property {'etb'|'land_etb'|'creature_etb'|'cast'|'upkeep'|'tap'|'draw_step'|'death'|'passive'} timing
+ * @property {'etb'|'land_etb'|'creature_etb'|'cast'|'upkeep'|'tap'|'draw_step'|'end_step'|'opponent_cast'|'opponent_draw'|'attack'|'combat_damage'|'sacrifice'|'death'|'on_resolution'} timing
  * @property {number|null} value       - cards drawn, mana added, etc. null for scaling effects
  * @property {boolean}  isConditional
  * @property {string|null} condition   - human-readable condition description
  * @property {TriggerFilter|null} [triggerFilter] - cast-timing trigger condition; null for self-ETB/upkeep/tap/passive
  * @property {string|null} [counterType]    - for draw_scaling_tap: counter name (e.g. 'burden')
  * @property {number|null} [expectedValue]  - User override: expected sim value for conditional effects (e.g. 2.0 expected draws)
- * @property {'simulatable'|'simulatable_soon'|'track_only'|'skip'} tier
+ * @property {'simulatable'|'track_only'|'skip'} tier  - 'simulatable_soon' is a legacy value (treated as track_only)
  * @property {'auto'|'user'} source    - 'auto' = detected by enrichment; 'user' = added via the effect editor
  */
 
@@ -64,6 +72,8 @@
  * @property {string|null} oracleText
  * @property {number|null} cmc
  * @property {string|null} manaCost
+ * @property {string|null} power
+ * @property {string|null} toughness
  * @property {EffectTag[]} effectTags
  */
 
@@ -102,6 +112,8 @@
  * @property {Card[]}   landsPlayed
  * @property {Card[]}   spellsCast
  * @property {number}   manaSpent
+ * @property {number}   manaAvailable  - total mana available at cast phase
+ * @property {number}   manaFromRocks  - mana contributed by non-land sources
  * @property {string[]} effectsFired   - e.g. ['Phyrexian Arena:upkeep:draw']
  */
 
@@ -128,6 +140,7 @@
  * @property {boolean}        enriched        - true if cards have Scryfall data
  * @property {GoodHandDef[]}      goodHandDefs        - User-defined hand quality checks
  * @property {DiscardPriority[]}  discardPriorities   - Ordered loot discard rules (additive; defaults to [])
+ * @property {Object}             [xCosts]            - { [cardName]: number } user-set X values for X-cost spells
  * @property {StrategyConfig}     strategyConfig      - Simulation strategy (merged with defaults)
  */
 
@@ -204,6 +217,13 @@ export const DEFAULT_STRATEGY_CONFIG = {
   maxTurns: 10,
   preferLowCMC: true,
   castCommanderWhenAble: false,
+  // Opponent simulation profile — used to fire opponent_draw / opponent_cast triggered abilities.
+  // Baseline: each opponent draws 1 card/turn. numOpponents sets how many opponents.
+  // opponentExtraDrawsPerRound: additional draws on top of the baseline (e.g. wheels, Rhystic Study opponents).
+  numOpponents: 3,
+  opponentExtraDrawsPerRound: 0,
+  opponentCreatureSpellsPerRound: 0,
+  opponentNoncreatureSpellsPerRound: 0,
 };
 
 /** Card types we recognize and display (order matters for UI) */

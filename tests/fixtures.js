@@ -126,3 +126,49 @@ export const ETB_DRAW_DECK = makeDeck(
   ],
   { enriched: true },
 );
+
+/** An artifact with a tap-loot effect ({T}: Draw 1, then discard 1). */
+export const LOOT_TAP = makeCard({
+  name: 'Loot Rock',
+  types: ['Artifact'],
+  cmc: 2,
+  effectTags: [{
+    category: 'draw',
+    subtype: 'loot',
+    timing: 'tap',
+    value: 1,
+    discardCount: 1,
+    isAdditionalCost: false,
+    isConditional: false,
+    condition: null,
+    triggerFilter: null,
+    tier: 'simulatable',
+    source: 'auto',
+  }],
+});
+
+/**
+ * 50 lands + 10 tap-loot artifacts (enriched).
+ * Loot rocks enter turn 2 (CMC 2) and tap immediately (no summoning sickness).
+ * avgEffectDrawsPerGame should be > 0.
+ */
+export const LOOT_DECK = makeDeck(
+  [
+    ...Array.from({ length: 50 }, (_, i) => makeCard({ name: `Forest${i}`, types: ['Land'], cmc: 0 })),
+    ...Array.from({ length: 10 }, (_, i) => ({ ...LOOT_TAP, name: `LootRock${i}` })),
+  ],
+  { enriched: true },
+);
+
+/**
+ * 50 lands + 10 Howling Mine (upkeep draw 1, CMC 2) — enriched.
+ * Upkeep draw fires from turn 3 onward after the Mine enters on turn 2.
+ * avgEffectDrawsPerGame should be > 0.
+ */
+export const UPKEEP_DRAW_DECK = makeDeck(
+  [
+    ...Array.from({ length: 50 }, (_, i) => makeCard({ name: `Forest${i}`, types: ['Land'], cmc: 0 })),
+    ...Array.from({ length: 10 }, (_, i) => ({ ...UPKEEP_DRAW, name: `HowlingMine${i}` })),
+  ],
+  { enriched: true },
+);

@@ -1,37 +1,80 @@
-# 🎣 MTG Goldfish — Commander Simulator
+# 🎣 MTG Goldfishery — Commander Simulator
 
 A client-side Commander deck simulator that runs entirely in the browser.
-No server, no login, no ads. All computation happens locally.
+No server, no login, no build step. All computation happens locally.
 
 **Live site:** `https://bradholbrook.github.io/mtg-goldfishery/`
 
 ---
 
-## What It Does (v1.0 — MVP)
+## What It Does
 
-- **Import** a Moxfield Commander decklist (plain-text paste)
-- **Simulate** N opening hands (100 / 1,000 / 5,000 / 10,000 games)
-- **Report** card type breakdown across simulated hands:
-  - Average cards of each type seen in opening hand
-  - % of hands containing at least one of each type
-  - % of "good land hands" (2–4 lands)
-  - Deck composition by card type
-- **Save / Load** all decks and results as a portable `.json` file
+### Import & Enrich
+- Import a Moxfield Commander decklist (plain-text paste or Moxfield URL)
+- Automatically fetches card data from Scryfall (oracle text, CMC, types, keywords)
+- Detects card effects via regex and tags them as simulatable or track-only
+- Supports Modal Double-Faced Cards (MDFCs) with per-face type and effect data
+- Caches all Scryfall data in localStorage (30-day TTL — no repeat fetches)
+
+### Effect Detection
+Cards are analyzed for draw and ramp effects at import time:
+
+| Effect | Examples | Simulated? |
+|--------|----------|-----------|
+| ETB draw | Mulldrifter, Rhystic Oracle | ✅ |
+| Upkeep draw | Phyrexian Arena, Howling Mine | ✅ |
+| End step draw | Jin-Gitaxias, Alhammarret's Archive | ✅ |
+| Tap draw | Azami, Staff of Nin | ✅ |
+| Loot (draw+discard) | Faithless Looting, Hazoret's Monument | ✅ |
+| Spell resolution draw | Night's Whisper, Harmonize | ✅ |
+| Cast trigger draw | Beast Whisperer, Edric | ✅ |
+| Land ETB draw | Tatyova, Tireless Tracker | ✅ |
+| Mana rocks | Sol Ring, Arcane Signet, Grim Monolith | ✅ |
+| Conditional draw | Rhystic Study, Consecrated Sphinx | tracked |
+| Sacrifice draws | Greater Good, Life's Legacy | tracked |
+| Combat damage draw | Toski, Coastal Piracy | tracked |
+| Death triggers | Dark Confidant (upkeep detected) | tracked |
+
+Users can override any auto-detected tag in the Cards tab.
+
+### Simulation
+Turn-by-turn goldfish simulation (no opponent decisions):
+- **Turn loop:** Untap → Upkeep → Draw → Mana (lands + rocks) → Land → Tap Draw → Cast → End Step → Record
+- Greedy play engine: casts highest-priority affordable spells each turn
+- Mana rocks tap automatically for mana before the cast phase
+- Discard priority rules for loot effects (configurable)
+- Commander tax applied to commander recasts
+- MDFC land-back selection (sacrifices worst spell face to make land drops)
+- Configurable cast priority order and CMC preference
+
+### Opening Hand Analysis
+- Simulates N opening hands (100 / 1,000 / 5,000 / 10,000)
+- Average cards of each type per opening hand
+- % of hands containing at least one of each type
+- Custom "Good Hand Definitions" — define criteria for what makes a keepable hand
+
+### Results
+- Average cards drawn by turn N (cumulative)
+- Effect draw breakdown by card (draws per game from each draw engine)
+- % of games with at least one draw effect firing
+
+### Save / Load
+- All decks, config, and results saved as a portable `.json` file
+- Save version `2.0` with forward-compatible schema
 
 ---
 
 ## Getting Started (Local)
 
-No build step required. This is pure HTML/CSS/JS with ES modules.
+No build step required. Pure HTML/CSS/JS with ES modules.
 
 ```bash
 git clone https://github.com/bradholbrook/mtg-goldfishery
 cd mtg-goldfishery
 
-# Serve locally (required for ES modules — can't open index.html directly)
-python3 -m http.server 8080
-# or: npx serve .
-# then open http://localhost:8080
+./serve.sh          # python3 dev-server.py on port 8080
+# or: python3 -m http.server 8080
+# open http://localhost:8080
 ```
 
 ---
@@ -40,8 +83,8 @@ python3 -m http.server 8080
 
 1. Fork or push this repo to your GitHub account
 2. Go to **Settings → Pages → Source → GitHub Actions**
-3. The included `.github/workflows/deploy.yml` will auto-deploy on every push to `main`
-4. Your site will be live at `https://bradholbrook.github.io/mtg-goldfishery/`
+3. The included `.github/workflows/deploy.yml` auto-deploys on every push to `main`
+4. Your site will be live at `https://yourusername.github.io/mtg-goldfishery/`
 
 ---
 
@@ -53,12 +96,29 @@ mtg-goldfishery/
 ├── css/
 │   └── style.css           # Dark-mode design system
 ├── js/
-│   ├── types.js            # Data structure definitions & constants
+│   ├── app.js              # Entry point, state, event wiring, refresh()
+│   ├── types.js            # Typedefs, CARD_TYPES, DEFAULT_STRATEGY_CONFIG
 │   ├── parser.js           # Moxfield decklist parser
-│   ├── simulator.js        # Simulation engine
-│   ├── storage.js          # In-memory state + save/load
-│   ├── ui.js               # DOM rendering
-│   └── app.js              # Entry point, event wiring
+│   ├── enrichment.js       # Scryfall fetch + localStorage cache
+│   ├── effects.js          # Effect tag detection (regex at import time only)
+│   ├── effect-types.js     # Effect type registry (draw, loot, mana_rock, etc.)
+│   ├── simulator.js        # Turn-by-turn simulation engine
+│   ├── criteria.js         # Good Hand Definition criteria registry
+│   ├── storage.js          # In-memory appState + save/load JSON
+│   ├── ui.js               # Thin shell re-exporting UI modules
+│   └── ui/
+│       ├── shared.js       # TYPE_COLORS, escapeHtml, formatRelativeTime
+│       ├── deck-list.js    # Left-panel deck list
+│       ├── overview-tab.js # Deck overview + type breakdown
+│       ├── cards-tab.js    # Card list + effect tag editor
+│       ├── config-tab.js   # Strategy config + Good Hand Defs + discard priorities
+│       └── results-tab.js  # Simulation results + charts
+├── tests/
+│   ├── helpers.js          # makeCard / makeDeck / makeGoodHandDef factories
+│   ├── fixtures.js         # Standard test decks
+│   ├── effects.test.js     # Effect detection tests
+│   ├── simulator.test.js   # Simulation engine tests
+│   └── criteria.test.js    # Good Hand Definition criteria tests
 ├── .github/
 │   └── workflows/
 │       └── deploy.yml      # GitHub Pages deployment
@@ -67,67 +127,44 @@ mtg-goldfishery/
 
 ---
 
-## Roadmap
+## Running Tests
 
-### v1.1 — Scryfall Enrichment
-- Fetch real card types, CMC, mana cost from Scryfall API on import
-- Replace name-based type guessing with accurate data
-- Cache card data in localStorage to avoid repeat fetches
-- Identify lands, ramp, draw, tutors, removal automatically
-
-### v1.2 — Turn Simulation
-- Simulate turns 1–10 (draw step, play land, cast spells)
-- Generic greedy play engine (highest CMC affordable first)
-- Track mana available per turn, spells cast per turn by type
-- Report: average mana curve, average spells/turn
-
-### v1.3 — Commander + Key Cards
-- Mark commander (auto-detected from import)
-- Track % of games commander could be cast by turn N
-- Mark 1–5 key cards, track % of games each seen by turn N
-- "Key card in hand by turn 4" consistency stat
-
-### v1.4 — Mulligan Logic
-- London Mulligan simulation (draw 7, put N back)
-- Configurable keep rules: "keep if 2–4 lands and 1 ramp"
-- Report: % of hands that auto-keep vs mulligan
-
-### v2.0 — Win Condition Modeling
-- Define a win condition as a set of cards that must be in play
-- Report: % of games win condition assembled by turn N
-- Tutor targeting: fetch highest-priority missing key card
-
-### v2.1 — Deck Comparison
-- Run two deck versions side by side
-- Diff stats between versions
-- "Is adding card X better than card Y?" answer
-
-### v3.0 — Community Profiles
-- Export/import deck configs as shareable JSON URLs
-- Public strategy profiles for common Commander archetypes
-- Compare your deck stats against archetype benchmarks
+```bash
+node --test tests/*.test.js   # Node 18+, no npm install required
+# or double-click run-tests.command
+```
 
 ---
 
-## Data Structures
+## Roadmap
 
-All save data is a plain JSON file with this shape:
+### Done
+- Scryfall enrichment with localStorage cache
+- MDFC (Modal Double-Faced Card) support with per-face type/effect data
+- Turn-by-turn simulation: draw, land drop, tap draw, cast, ETB/upkeep/end step effects
+- Loot / rummage / additional-cost discard effects
+- Cast trigger effects with spell-type filters (creature, instant/sorcery, etc.)
+- Mana rock simulation (Sol Ring, Arcane Signet, etc. contribute to cast budget)
+- Configurable discard priorities for loot effects
+- Good Hand Definition system (criteria-based opening hand evaluation)
+- Card effect editor (override or supplement auto-detected tags)
+- Opponent phase modeling (draws and spell casts between our turns)
 
-```json
-{
-  "version": "1.0",
-  "savedAt": "2025-01-01T00:00:00.000Z",
-  "decks": [ ...DeckConfig[] ],
-  "results": [ ...SimulationResults[] ]
-}
-```
+### Next
+- **Land ramp simulation** — Cultivate, Kodama's Reach put lands into play
+- **Mana curve stats** — mana available vs. spent by turn N
+- **London Mulligan** — draw 7, keep based on Good Hand Definition criteria
+- **Multi-draw ETB** — conditional ETB draw filters (CMC ≤ 3, power ≤ 2)
 
-See `js/types.js` for full type documentation.
+### Later
+- Tutor simulation with priority target list
+- Win condition tracking (pieces assembled by turn N)
+- Deck comparison (run two versions side by side)
 
 ---
 
 ## Contributing
 
 Issues and PRs welcome. The codebase is deliberately simple:
-no build tools, no framework, no dependencies.
-All logic is in plain ES module JS files.
+no build tools, no framework, no npm dependencies.
+All logic is plain ES module JS files.

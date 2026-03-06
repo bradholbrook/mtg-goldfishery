@@ -18,6 +18,8 @@ import {
   ALL_CREATURES_DECK,
   ALL_MDFC_DECK,
   ETB_DRAW_DECK,
+  UPKEEP_DRAW_DECK,
+  LOOT_DECK,
 } from './fixtures.js';
 
 // ── flattenDeck ───────────────────────────────────────────────────────────────
@@ -83,6 +85,33 @@ describe('getPrimaryType', () => {
 
   it('is case-insensitive', () => {
     assert.equal(getPrimaryType(['land', 'creature']), 'Creature');
+  });
+
+  it('prefers Enchantment over Land (Enchantment Land priority)', () => {
+    assert.equal(getPrimaryType(['Land', 'Enchantment']), 'Enchantment');
+  });
+
+  it('MDFC sentinel not in priority list — falls through to first type', () => {
+    // ['Sorcery', 'Land', 'MDFC'] → Sorcery wins via priority
+    assert.equal(getPrimaryType(['Sorcery', 'Land', 'MDFC']), 'Sorcery');
+  });
+
+  it('unknown-only type falls through to first element', () => {
+    assert.equal(getPrimaryType(['MDFC']), 'MDFC');
+  });
+
+});
+
+// ── runSimulation — error handling ────────────────────────────────────────────
+
+describe('runSimulation — error handling', () => {
+
+  it('throws when deck has fewer than 7 cards', () => {
+    const tinyDeck = makeDeck([makeCard({ quantity: 6 })]);
+    assert.throws(
+      () => runSimulation(tinyDeck, 1),
+      /at least 7 cards/,
+    );
   });
 
 });
@@ -162,6 +191,24 @@ describe('runSimulation — goodHandDefs', () => {
     assert.ok('my-def' in summary.goodHandDefPcts);
   });
 
+  it('goodHandAnyPct reflects union: 100% when at least one def always passes', () => {
+    const always = makeGoodHandDef([{ type: 'at_least_type', count: 4, cardType: 'Land' }]);
+    const never  = makeGoodHandDef([{ type: 'at_least_type', count: 1, cardType: 'Creature' }]);
+    always.id = 'always'; never.id = 'never';
+    const { summary } = runSimulation(ALL_LANDS_DECK, 500, [always, never]);
+    assert.equal(summary.goodHandDefPcts['always'], 100);
+    assert.equal(summary.goodHandDefPcts['never'], 0);
+    assert.equal(summary.goodHandAnyPct, 100); // union: always passes
+  });
+
+  it('goodHandAnyPct is 0 when all defs always fail', () => {
+    const d1 = makeGoodHandDef([{ type: 'at_least_type', count: 1, cardType: 'Creature' }]);
+    const d2 = makeGoodHandDef([{ type: 'at_least_type', count: 1, cardType: 'Artifact' }]);
+    d1.id = 'd1'; d2.id = 'd2';
+    const { summary } = runSimulation(ALL_LANDS_DECK, 500, [d1, d2]);
+    assert.equal(summary.goodHandAnyPct, 0);
+  });
+
 });
 
 // ── runSimulation — enriched (turn-by-turn) ───────────────────────────────────
@@ -196,6 +243,56 @@ describe('runSimulation — enriched deck (turn-by-turn)', () => {
         `avgCardsDrawnByTurn should be non-decreasing but turn ${turns[i]} (${curr}) < turn ${turns[i-1]} (${prev})`,
       );
     }
+  });
+
+  it('UPKEEP_DRAW_DECK: upkeep effects fire after Mine enters (avgEffectDrawsPerGame > 0)', () => {
+    // Howling Mine costs 2; enters turn 2. Upkeep draw fires turn 3 onward.
+    const { summary } = runSimulation(UPKEEP_DRAW_DECK, 1000);
+    assert.ok(
+      summary.avgEffectDrawsPerGame > 0,
+      `Expected avgEffectDrawsPerGame > 0, got ${summary.avgEffectDrawsPerGame}`,
+    );
+  });
+
+  it('LOOT_DECK: tap loot fires and shows up in avgEffectDrawsPerGame', () => {
+    // Artifacts have no summoning sickness — loot rock taps the same turn it enters.
+    const { summary } = runSimulation(LOOT_DECK, 1000);
+    assert.ok(
+      summary.avgEffectDrawsPerGame > 0,
+      `Expected avgEffectDrawsPerGame > 0, got ${summary.avgEffectDrawsPerGame}`,
+    );
+  });
+
+  it('LOOT_DECK: drawEffectSourceBreakdown tracks loot card by name', () => {
+    const { summary } = runSimulation(LOOT_DECK, 200);
+    const sources = Object.keys(summary.drawEffectSourceBreakdown ?? {});
+    assert.ok(
+      sources.some(s => s.startsWith('LootRock')),
+      `Expected a LootRock entry in drawEffectSourceBreakdown, got: ${JSON.stringify(sources)}`,
+    );
+  });
+
+  it('MDFC-only deck plays a land drop each turn via the land face', () => {
+    // When no pure land is in hand, the MDFC land-back should be played.
+    // avgCardsDrawnByTurn[1] >= 8 means simulation ran (7 opening + at least 1 draw step).
+    const mdfcDeck = makeDeck(
+      Array.from({ length: 60 }, (_, i) => makeCard({
+        name: `Spell${i} // Land${i}`,
+        types: ['Sorcery', 'Land', 'MDFC'],
+        cmc: 2,
+        isMDFC: true,
+        faces: [
+          { name: `Spell${i}`, types: ['Sorcery'], cmc: 2, oracleText: '', effectTags: [] },
+          { name: `Land${i}`, types: ['Land'], cmc: 0, oracleText: '', effectTags: [] },
+        ],
+      })),
+      { enriched: true },
+    );
+    const { summary } = runSimulation(mdfcDeck, 200);
+    assert.ok(
+      summary.avgCardsDrawnByTurn[1] >= 8,
+      `Expected ≥8 cards drawn by turn 1, got ${summary.avgCardsDrawnByTurn[1]}`,
+    );
   });
 
 });

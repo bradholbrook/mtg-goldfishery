@@ -186,13 +186,16 @@ function extractEnrichmentFields(scryfallCard) {
     const faces = scryfallCard.card_faces.map(face => {
       const faceOracleText = face.oracle_text || null;
       const faceKeywords = face.keywords || [];
+      const faceTypes = typeLineToTypes(face.type_line || '');
       return {
         name: face.name || '',
-        types: typeLineToTypes(face.type_line || ''),
+        types: faceTypes,
         oracleText: faceOracleText,
         cmc: face.cmc ?? null,
         manaCost: face.mana_cost || null,
-        effectTags: detectEffectTags(faceOracleText, faceKeywords),
+        power: face.power ?? null,
+        toughness: face.toughness ?? null,
+        effectTags: detectEffectTags(faceOracleText, faceKeywords, faceTypes),
       };
     });
 
@@ -220,6 +223,8 @@ function extractEnrichmentFields(scryfallCard) {
       types,
       isMDFC: true,
       faces,
+      power: faces[0].power ?? null,
+      toughness: faces[0].toughness ?? null,
       imageUrl: scryfallCard.image_uris?.normal
              ?? scryfallCard.card_faces?.[0]?.image_uris?.normal
              ?? null,
@@ -236,10 +241,10 @@ function extractEnrichmentFields(scryfallCard) {
     keywords = scryfallCard.card_faces[0].keywords || keywords;
   }
 
-  const effectTags = detectEffectTags(oracleText, keywords);
   // Use typeLineToTypes() so multi-type cards (e.g. "Enchantment Land", "Artifact Creature")
   // carry all their types rather than only the primary one.
   const types = scryfallCard.type_line ? typeLineToTypes(scryfallCard.type_line) : null;
+  const effectTags = detectEffectTags(oracleText, keywords, types ?? []);
 
   return {
     oracleText,
@@ -253,6 +258,8 @@ function extractEnrichmentFields(scryfallCard) {
     types,
     isMDFC: false,
     faces: null,
+    power: scryfallCard.power ?? scryfallCard.card_faces?.[0]?.power ?? null,
+    toughness: scryfallCard.toughness ?? scryfallCard.card_faces?.[0]?.toughness ?? null,
     imageUrl: scryfallCard.image_uris?.normal
            ?? scryfallCard.card_faces?.[0]?.image_uris?.normal
            ?? null,
@@ -340,6 +347,8 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
               types: null,
               isMDFC: false,
               faces: null,
+              power: null,
+              toughness: null,
             });
           }
         }
@@ -359,6 +368,8 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
               types: null,
               isMDFC: false,
               faces: null,
+              power: null,
+              toughness: null,
             });
           }
         }
