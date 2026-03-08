@@ -105,7 +105,7 @@ const TIMING_PATTERNS = [
   { timing: 'opponent_cast',re: /(?:an opponent|a player) casts?\b/i },
   { timing: 'opponent_draw',re: /(?:an opponent|a player) draws?\b/i },
   { timing: 'attack',       re: /\battacks\b/i },
-  { timing: 'combat_damage',re: /\bdeals? combat damage\b/i },
+  { timing: 'combat_damage',re: /\b(?:deals?|dealt) combat damage\b/i },
   { timing: 'sacrifice',    re: /you sacrifice\b/i },
   { timing: 'death',        re: /\bdies\b/i },
 ];
@@ -133,6 +133,15 @@ function detectTimingFromAbility(ability, isInstantOrSorcery) {
   for (const { timing, re } of TIMING_PATTERNS) {
     if (re.test(trigger)) return timing;
   }
+
+  // Fallback for comma-in-name cards (e.g. "Gadwick, the Wizened", "Gix, Yawgmoth Praetor"):
+  // the non-greedy trigger regex splits at the first comma, leaving only the name fragment
+  // in `trigger`. If nothing matched, scan the full raw ability text for timing patterns.
+  // Safe because: the raw text of a single ability block still identifies the correct timing.
+  for (const { timing, re } of TIMING_PATTERNS) {
+    if (re.test(ability.raw)) return timing;
+  }
+
   return null;
 }
 
@@ -219,6 +228,21 @@ function detectTriggerFilter(timing, trigger) {
   return null;
 }
 
+// ─── Replacement Effect Patterns ──────────────────────────────────────────────
+
+/**
+ * Matches "if you would draw a card/cards ... instead" — draw replacement effects.
+ * e.g. Alhammarret's Archive, Thought Reflection, Teferi's Ageless Insight.
+ */
+const DRAW_REPLACEMENT_PATTERN =
+  /if you would draw (?:a card|cards)[^.]*?\binstead\b/i;
+
+/**
+ * Matches the "except the first one you draw each turn" clause (Teferi's Ageless Insight).
+ */
+const DRAW_REPLACEMENT_EXCEPT_FIRST_PATTERN =
+  /except the first one you draw each turn/i;
+
 // ─── Scaling Tap Draw ─────────────────────────────────────────────────────────
 
 /**
@@ -287,17 +311,19 @@ const DRAW_UNCONDITIONAL_PATTERNS = [
 
 /** Patterns that indicate a conditional draw (requires extra check/cost/trigger). */
 const DRAW_CONDITIONAL_PATTERNS = [
-  // "you may draw a card" or "you may draw N cards" — always conditional (e.g. Consecrated Sphinx)
-  { re: /\byou may draw (two|three|four|five|six|seven|\d+) cards?\b/i, getValue: m => parseCount(m[1]), conditional: true, condition: 'may draw' },
-  { re: /\byou may draw a card\b/i, getValue: () => 1, conditional: true, condition: 'may draw' },
+  // "you may draw N cards" / "you may draw a card" — goldfishing always says yes, so treat as
+  // unconditional for simulation (value is known, choice is yours). isConditional=false.
+  { re: /\byou may draw (two|three|four|five|six|seven|\d+) cards?\b/i, getValue: m => parseCount(m[1]), conditional: false, condition: null },
+  { re: /\byou may draw a card\b/i, getValue: () => 1, conditional: false, condition: null },
   // "draw a card if ..."
   { re: /\bdraw a card if\b/i, getValue: () => 1, conditional: true, condition: 'conditional draw' },
   // "draw a card for each ..."
   { re: /\bdraw a card for each\b/i, getValue: () => null, conditional: true, condition: 'draw per condition' },
   // "draw X cards for each ..."  or "draw cards equal to ..."
   { re: /\bdraw (?:cards?|a card) equal to\b/i, getValue: () => null, conditional: true, condition: 'draw equal to' },
-  // "draw X cards" / "draws X cards" — variable amount like Blue Sun's Zenith, Stroke of Genius
-  { re: /\bdraws? X cards?\b/i, getValue: () => null, conditional: true, condition: 'draw X' },
+  // "draw X cards" / "draws X cards" — variable amount like Blue Sun's Zenith, Stroke of Genius, Gadwick.
+  // Not truly conditional — X is user-set in the X Spell Values config. Simulatable when X > 0.
+  { re: /\bdraws? X cards?\b/i, getValue: () => null, conditional: false, condition: 'draw X' },
 ];
 
 /** Extract discard count from a sentence containing "discard N cards" */
@@ -331,17 +357,22 @@ function parseManaValue(manaStr) {
 // ─── Tag Builders ─────────────────────────────────────────────────────────────
 
 /**
- * Assign a tier based on timing, conditional flag, value, and subtype.
+ * Assign a tier based on timing, conditional flag, value, subtype, and condition.
  *
- * @param {string}  timing
- * @param {boolean} isConditional
- * @param {number|null} value
- * @param {string}  subtype
+ * @param {string}       timing
+ * @param {boolean}      isConditional
+ * @param {number|null}  value
+ * @param {string}       subtype
+ * @param {string|null}  [condition]
  * @returns {'simulatable'|'simulatable_soon'|'track_only'|'skip'}
  */
-function assignTier(timing, isConditional, value, subtype) {
+function assignTier(timing, isConditional, value, subtype, condition = null) {
   // Scaling tap draw always simulatable (value is dynamic — tracked via counters)
   if (subtype === 'draw_scaling_tap') return 'simulatable';
+  // Draw replacement (Alhammarret's Archive etc.) is always-on and simulatable
+  if (subtype === 'draw_replacement') return 'simulatable';
+  // Draw X: value comes from xCosts config — always simulatable (draws 0 when X not set)
+  if (condition === 'draw X') return 'simulatable';
   if (isConditional) return 'track_only';
   // Loot is now fully simulatable via resolveLootEffects + selectCardToDiscard
   if (subtype === 'loot') return 'simulatable';
@@ -379,7 +410,7 @@ function makeDrawTag(subtype, timing, value, isConditional, condition = null, tr
     isConditional,
     condition,
     triggerFilter,
-    tier: assignTier(timing, isConditional, value, subtype),
+    tier: assignTier(timing, isConditional, value, subtype, condition),
     source: 'auto',
   };
 }
@@ -405,6 +436,101 @@ function makeLootTag(timing, drawCount, discardCount, isAdditionalCost = false, 
     triggerFilter,
     tier: 'simulatable',
     source: 'auto',
+  };
+}
+
+// ─── Tutor Pattern ────────────────────────────────────────────────────────────
+
+const TUTOR_SEARCH_PATTERN = /search your library for (.+?) cards?\b/i;
+
+/**
+ * Parse a FetchConstraint from the tutor capture group text.
+ * e.g. "a basic land" → {supertype:'Basic', type:'Land'}
+ *      "any"          → {any:true}
+ *      "a creature"   → {type:'Creature'}
+ * @param {string} captureText
+ * @returns {import('./types.js').FetchConstraint}
+ */
+const BASIC_LAND_SUBTYPES = ['Forest', 'Island', 'Mountain', 'Plains', 'Swamp'];
+
+function parseFetchConstraint(captureText) {
+  // Strip quantity qualifiers that don't affect the constraint type
+  const t = captureText
+    .replace(/\bup to \w+\b/gi, '')
+    .replace(/\bany number of\b/gi, '')
+    .replace(/\btarget\b/gi, '')
+    .replace(/\bnontoken\b/gi, '')
+    .trim();
+
+  // "any card" or bare "a card" → unrestricted
+  if (/\bany\b/i.test(t) || /^(?:a|an)?\s*cards?$/.test(t.trim())) {
+    return { any: true, nonland: false, supertype: null, type: null, subtypes: null };
+  }
+
+  const nonland = /\bnonland\b/i.test(t);
+  const supertype = /\bbasic\b/i.test(t)    ? 'Basic'
+    : /\blegendary\b/i.test(t) ? 'Legendary'
+    : /\bsnow\b/i.test(t)      ? 'Snow'
+    : null;
+
+  // Collect ALL basic land subtypes found (handles "Plains or Island", "Forest or Plains" etc.)
+  const foundSubtypes = BASIC_LAND_SUBTYPES.filter(sub =>
+    new RegExp(`\\b${sub}\\b`, 'i').test(t)
+  );
+  const subtypes = foundSubtypes.length > 0 ? foundSubtypes : null;
+
+  let type = null;
+  if      (subtypes)                              type = 'Land'; // subtype implies Land
+  else if (/\bland\b/i.test(t))                  type = 'Land';
+  else if (/\bcreature\b/i.test(t))              type = 'Creature';
+  else if (/\bartifact or enchantment\b/i.test(t)) type = 'ArtifactOrEnchantment';
+  else if (/\bartifact\b/i.test(t))              type = 'Artifact';
+  else if (/\benchantment\b/i.test(t))           type = 'Enchantment';
+  else if (/\bplaneswalker\b/i.test(t))          type = 'Planeswalker';
+  else if (/\binstant or sorcery\b/i.test(t))    type = 'InstantOrSorcery';
+  else if (/\binstant\b/i.test(t))               type = 'Instant';
+  else if (/\bsorcery\b/i.test(t))               type = 'Sorcery';
+  else if (/\bpermanent\b/i.test(t))             type = 'Permanent';
+
+  // Nothing recognized → any card
+  if (!nonland && !supertype && !type && !subtypes) {
+    return { any: true, nonland: false, supertype: null, type: null, subtypes: null };
+  }
+
+  return { any: false, nonland, supertype, type, subtypes };
+}
+
+/**
+ * Detect a tutor effect tag from a parsed ability.
+ * Returns null if no "search your library" pattern is found, or timing is null.
+ * @param {ParsedAbility} ability
+ * @param {string|null} timing
+ * @param {import('./types.js').TriggerFilter|null} triggerFilter
+ * @returns {import('./types.js').EffectTag|null}
+ */
+function detectTutorTag(ability, timing, triggerFilter) {
+  if (timing === null) return null;
+  const searchMatch = ability.effect.match(TUTOR_SEARCH_PATTERN);
+  if (!searchMatch) return null;
+
+  const fetchType = parseFetchConstraint(searchMatch[1]);
+
+  let putWhere = 'hand';
+  if (/put it onto the battlefield\b/i.test(ability.effect)) putWhere = 'battlefield';
+  else if (/on top of your library\b/i.test(ability.effect))  putWhere = 'top_of_library';
+
+  return {
+    category:      'tutor',
+    subtype:       'tutor',
+    timing,
+    value:         null,
+    isConditional: false,
+    condition:     null,
+    triggerFilter,
+    fetchType,
+    putWhere,
+    tier:          'simulatable',
+    source:        'auto',
   };
 }
 
@@ -444,6 +570,28 @@ export function detectEffectTags(oracleText, keywords = [], cardTypes = []) {
     .join('\n');
 
   for (const ability of parseAbilities(cleanText)) {
+    // ── Replacement effects: static "if you would ... instead" ───────────────
+    // Must run before timing detection — static abilities return timing=null by default.
+    // Only static (spell-type) abilities can be replacement effects.
+    if (ability.abilityType === 'spell') {
+      if (DRAW_REPLACEMENT_PATTERN.test(ability.effect)) {
+        const exceptFirst = DRAW_REPLACEMENT_EXCEPT_FIRST_PATTERN.test(ability.effect);
+        tags.push({
+          category:    'replacement',
+          subtype:     'draw_replacement',
+          timing:      'static',
+          multiplier:  2,
+          exceptFirst,
+          isConditional: false,
+          condition:   null,
+          triggerFilter: null,
+          tier:        'simulatable',
+          source:      'auto',
+        });
+        continue;
+      }
+    }
+
     // ── Mana rock: activated {T}: Add {mana} ────────────────────────────────
     // Must run before draw detection so "{T}: Add {G}" doesn't fall through.
     if (ability.abilityType === 'activated' && /\{T\}/i.test(ability.trigger ?? '')) {
@@ -480,6 +628,14 @@ export function detectEffectTags(oracleText, keywords = [], cardTypes = []) {
 
     const timing = detectTimingFromAbility(ability, isInstantOrSorcery);
     const triggerFilter = timing ? detectTriggerFilter(timing, ability.trigger ?? '') : null;
+
+    // ── Tutor: "Search your library for X card..." ─────────────────────────
+    // Check before the effect-sentence loop; tutor abilities skip draw detection.
+    const tutorTag = detectTutorTag(ability, timing, triggerFilter);
+    if (tutorTag) {
+      tags.push(tutorTag);
+      continue;
+    }
 
     // Split the effect clause into sentences for cross-sentence pattern matching
     // (e.g. "discard a card. If you do, draw a card." spans two sentences).
@@ -525,8 +681,9 @@ export function detectEffectTags(oracleText, keywords = [], cardTypes = []) {
         continue;
       }
 
-      // ── 1b. If-you-do draw (cross-sentence rummage) ───────────────────────
-      // "...you may discard a card. If you do, draw a card."
+      // ── 1b. If-you-do draw (cross-sentence rummage or mana-gated draw) ──────
+      // "...you may discard a card. If you do, draw a card."  → loot
+      // "...you may pay {1}. If you do, draw a card."         → conditional (mana_payment)
       if (IF_YOU_DO_DRAW_PATTERN.test(sentence)) {
         const prevSentence = i > 0 ? effectSentences[i - 1] : '';
         if (/\bdiscard\b/i.test(prevSentence) && timing !== null) {
@@ -535,7 +692,15 @@ export function detectEffectTags(oracleText, keywords = [], cardTypes = []) {
           tags.push(makeLootTag(timing, drawCount, discardCount, false, triggerFilter));
           continue;
         }
-        // If prev sentence doesn't mention discard, fall through to draw patterns
+        if (/\byou may pay\b/i.test(prevSentence) && timing !== null) {
+          // Cost-gated: "you may pay {N}. If you do, draw" or "you may pay N life. If you do, draw".
+          // Conditional — user pays to draw; mark track_only so user can tune expected value.
+          const drawCount = parseDrawCount(sentence);
+          const conditionType = /\blife\b/i.test(prevSentence) ? 'life_payment' : 'mana_payment';
+          tags.push(makeDrawTag('draw_n', timing, drawCount, true, conditionType, triggerFilter));
+          continue;
+        }
+        // If prev sentence doesn't mention discard or pay, fall through to draw patterns
       }
 
       // ── 1c. Rummage: "discard N, then draw M" (same sentence) ────────────
@@ -612,4 +777,27 @@ export function getTrackOnlyTags(tags) {
  */
 export function hasDrawEffect(tags) {
   return tags.some(t => t.category === 'draw');
+}
+
+/**
+ * Detect whether a land enters the battlefield tapped.
+ *
+ * Exceptions treated as "enters untapped" in goldfishing:
+ *  - "unless you control two or more opponents" — always true in Commander (3+ opponents)
+ *  - "If you don't, ~ enters the battlefield tapped" — shock land pattern; we always pay
+ *
+ * All other "unless" conditions (check lands, fast lands, etc.) are treated
+ * conservatively as ETB tapped.
+ *
+ * @param {string|null} oracleText
+ * @returns {boolean}
+ */
+export function detectEtbTapped(oracleText) {
+  if (!oracleText) return false;
+  if (!/enters(?: the battlefield)? tapped/i.test(oracleText)) return false;
+  // Shock land pattern: "If you don't, ~ enters the battlefield tapped." — always pay in goldfish
+  if (/if you don't.*enters(?: the battlefield)? tapped/i.test(oracleText)) return false;
+  // "unless you control two or more opponents" — always met in Commander
+  if (/unless you control two or more opponents/i.test(oracleText)) return false;
+  return true;
 }

@@ -15,7 +15,7 @@
 
 import { describe, it } from 'node:test';
 import assert from 'node:assert/strict';
-import { detectEffectTags, getSimulatableTags, getTrackOnlyTags, hasDrawEffect } from '../js/effects.js';
+import { detectEffectTags, getSimulatableTags, getTrackOnlyTags, hasDrawEffect, detectEtbTapped } from '../js/effects.js';
 
 /**
  * Assert that detectEffectTags(oracleText) produces at least one tag whose
@@ -37,6 +37,26 @@ function assertTag(oracleText, expected, keywords = [], cardTypes = []) {
   assert.ok(
     match,
     `No tag matched ${JSON.stringify(expected)} for: "${oracleText}"\nGot tags: ${JSON.stringify(drawTags)}`,
+  );
+}
+
+/**
+ * Assert that detectEffectTags(oracleText) produces at least one replacement tag
+ * whose fields include all key/value pairs in `expected`.
+ */
+function assertReplacementTag(oracleText, expected, keywords = [], cardTypes = []) {
+  const tags = detectEffectTags(oracleText, keywords, cardTypes);
+  const replacementTags = tags.filter(t => t.category === 'replacement');
+  assert.ok(
+    replacementTags.length > 0,
+    `Expected at least one replacement tag for: "${oracleText}"\nGot: ${JSON.stringify(tags)}`,
+  );
+  const match = replacementTags.find(tag =>
+    Object.entries(expected).every(([k, v]) => tag[k] === v),
+  );
+  assert.ok(
+    match,
+    `No replacement tag matched ${JSON.stringify(expected)} for: "${oracleText}"\nGot: ${JSON.stringify(replacementTags)}`,
   );
 }
 
@@ -134,11 +154,11 @@ describe('tap draw detection', () => {
 
 describe('conditional draw detection', () => {
 
-  it('"you may draw a card" is marked conditional and track_only', () => {
+  it('"you may draw a card" is unconditional simulatable — goldfishing always draws', () => {
     assertTag('You may draw a card.', {
-      isConditional: true,
-      tier: 'track_only',
-      condition: 'may draw',
+      isConditional: false,
+      tier: 'simulatable',
+      condition: null,
     }, [], ['Sorcery']);
   });
 
@@ -190,8 +210,8 @@ describe('tier assignment', () => {
     assertTag('At the beginning of your upkeep, draw a card.', { tier: 'simulatable' });
   });
 
-  it('conditional draw is track_only', () => {
-    assertTag('You may draw a card.', { tier: 'track_only' }, [], ['Sorcery']);
+  it('"draw a card if condition" is track_only', () => {
+    assertTag('Draw a card if you control a Forest.', { tier: 'track_only', isConditional: true }, [], ['Sorcery']);
   });
 
   it('loot is simulatable', () => {
@@ -228,6 +248,13 @@ describe('creature_etb timing', () => {
     assertTag(
       'Whenever another nontoken creature enters the battlefield under your control, draw a card.',
       { timing: 'creature_etb', value: 1, tier: 'simulatable' },
+    );
+  });
+
+  it('detects Mentor of the Meek mana-gated "if you do, draw" as conditional (track_only)', () => {
+    assertTag(
+      'Whenever a creature with power 2 or less enters the battlefield under your control, you may pay {1}. If you do, draw a card.',
+      { timing: 'creature_etb', value: 1, isConditional: true, condition: 'mana_payment', tier: 'track_only' },
     );
   });
 
@@ -282,9 +309,21 @@ describe('end_step timing', () => {
 
 describe('opponent_cast timing', () => {
 
-  it('detects "whenever an opponent casts a spell, draw a card" (Rhystic Study)', () => {
+  it('detects Rhystic Study as simulatable opponent_cast draw', () => {
     assertTag('Whenever an opponent casts a spell, you may pay {1}. If you don\'t, draw a card.', {
       timing: 'opponent_cast',
+      value: 1,
+      isConditional: false,
+      tier: 'simulatable',
+    });
+  });
+
+  it('detects Mystic Remora as simulatable opponent_cast draw', () => {
+    assertTag('Whenever an opponent casts a noncreature spell, draw a card unless that player pays {4}.', {
+      timing: 'opponent_cast',
+      value: 1,
+      isConditional: false,
+      tier: 'simulatable',
     });
   });
 
@@ -292,11 +331,12 @@ describe('opponent_cast timing', () => {
 
 describe('opponent_draw timing', () => {
 
-  it('detects "whenever an opponent draws a card" (Consecrated Sphinx)', () => {
+  it('detects Consecrated Sphinx as simulatable — "you may draw" is unconditional in goldfish', () => {
     assertTag('Whenever an opponent draws a card, you may draw two cards.', {
       timing: 'opponent_draw',
-      isConditional: true,
-      tier: 'track_only',
+      value: 2,
+      isConditional: false,
+      tier: 'simulatable',
     });
   });
 
@@ -352,12 +392,28 @@ describe('put card into hand pattern', () => {
 
 describe('draw X cards pattern', () => {
 
-  it('detects "draw X cards" as conditional track_only (Blue Sun\'s Zenith)', () => {
+  it('detects "draw X cards" as simulatable (value comes from xCosts config)', () => {
     assertTag('Target player draws X cards.', {
       condition: 'draw X',
-      isConditional: true,
-      tier: 'track_only',
+      isConditional: false,
+      tier: 'simulatable',
     }, [], ['Sorcery']);
+  });
+
+  it('detects Gadwick ETB draw X as simulatable', () => {
+    assertTag('When Gadwick, the Wizened enters the battlefield, draw X cards.', {
+      timing: 'etb',
+      condition: 'draw X',
+      isConditional: false,
+      tier: 'simulatable',
+    });
+  });
+
+  it('detects life-payment gated draw (Gix-style) as conditional with life_payment', () => {
+    assertTag(
+      'Whenever a creature dealt combat damage by ~ this turn is put into a graveyard, you may pay 2 life. If you do, draw a card.',
+      { isConditional: true, condition: 'life_payment', tier: 'track_only' },
+    );
   });
 
 });
@@ -633,12 +689,12 @@ describe('cast trigger filter: artifact and instant/sorcery', () => {
 
 describe('additional conditional draw patterns', () => {
 
-  it('"you may draw two cards" is conditional with value 2 (multi-draw)', () => {
+  it('"you may draw two cards" is unconditional simulatable — goldfishing always draws', () => {
     assertTag('You may draw two cards.', {
-      isConditional: true,
+      isConditional: false,
       value: 2,
-      condition: 'may draw',
-      tier: 'track_only',
+      condition: null,
+      tier: 'simulatable',
     }, [], ['Sorcery']);
   });
 
@@ -761,6 +817,109 @@ describe('hasDrawEffect', () => {
   it('returns false for mana rock (ramp category)', () => {
     const tags = detectEffectTags('{T}: Add {G}.');
     assert.equal(hasDrawEffect(tags), false);
+  });
+
+});
+
+// ── draw_replacement detection ────────────────────────────────────────────────
+
+describe('draw_replacement detection', () => {
+
+  it('Alhammarret\'s Archive: "draw twice that many cards instead" produces draw_replacement', () => {
+    assertReplacementTag(
+      'If you would draw cards, you draw twice that many cards instead.',
+      { subtype: 'draw_replacement', multiplier: 2, exceptFirst: false, tier: 'simulatable', timing: 'static' },
+    );
+  });
+
+  it('Thought Reflection: "draw a card instead" variant produces draw_replacement', () => {
+    assertReplacementTag(
+      'If you would draw a card, you draw two cards instead.',
+      { subtype: 'draw_replacement', multiplier: 2, exceptFirst: false, tier: 'simulatable' },
+    );
+  });
+
+  it('Teferi\'s Ageless Insight: exceptFirst is true', () => {
+    assertReplacementTag(
+      'If you would draw a card except the first one you draw each turn, draw two cards instead.',
+      { subtype: 'draw_replacement', multiplier: 2, exceptFirst: true, tier: 'simulatable' },
+    );
+  });
+
+  it('draw_replacement has category: replacement (not draw)', () => {
+    const tags = detectEffectTags('If you would draw cards, you draw twice that many cards instead.');
+    const tag = tags.find(t => t.subtype === 'draw_replacement');
+    assert.ok(tag, 'expected draw_replacement tag');
+    assert.equal(tag.category, 'replacement');
+  });
+
+  it('draw_replacement does not produce a draw-category tag', () => {
+    const tags = detectEffectTags('If you would draw cards, you draw twice that many cards instead.');
+    const drawTags = tags.filter(t => t.category === 'draw');
+    assert.equal(drawTags.length, 0, 'should not produce a draw tag alongside the replacement tag');
+  });
+
+  it('Sheoldred "whenever you draw" does not produce draw_replacement', () => {
+    const tags = detectEffectTags('Whenever you draw a card, you gain 2 life.');
+    assert.equal(tags.filter(t => t.subtype === 'draw_replacement').length, 0);
+  });
+
+  it('draw_replacement has triggerFilter: null', () => {
+    const tags = detectEffectTags('If you would draw cards, you draw twice that many cards instead.');
+    const tag = tags.find(t => t.subtype === 'draw_replacement');
+    assert.equal(tag.triggerFilter, null);
+  });
+
+});
+
+describe('detectEtbTapped', () => {
+
+  it('plain ETB tapped (Temple of Mystery)', () => {
+    assert.equal(detectEtbTapped('Temple of Mystery enters the battlefield tapped.'), true);
+  });
+
+  it('ETB tapped using short form "enters tapped"', () => {
+    assert.equal(detectEtbTapped('This land enters tapped.'), true);
+  });
+
+  it('check land: enters tapped unless you control a basic land type', () => {
+    assert.equal(
+      detectEtbTapped('Isolated Chapel enters the battlefield tapped unless you control a Plains or a Swamp.'),
+      true,
+    );
+  });
+
+  it('fast land: enters tapped unless you control two or fewer other lands', () => {
+    assert.equal(
+      detectEtbTapped('Darkslick Shores enters the battlefield tapped unless you control two or fewer other lands.'),
+      true,
+    );
+  });
+
+  it('shock land pattern (Sacred Foundry) — always pay in goldfish → untapped', () => {
+    assert.equal(
+      detectEtbTapped('({T}: Add {R} or {W}.) As Sacred Foundry enters the battlefield, you may pay 2 life. If you don\'t, Sacred Foundry enters the battlefield tapped.'),
+      false,
+    );
+  });
+
+  it('"unless you control two or more opponents" — always met in Commander → untapped', () => {
+    assert.equal(
+      detectEtbTapped('Spectator Seating enters the battlefield tapped unless you control two or more opponents.'),
+      false,
+    );
+  });
+
+  it('basic land — no ETB tapped text → false', () => {
+    assert.equal(detectEtbTapped('({T}: Add {G}.)'), false);
+  });
+
+  it('null oracle text → false', () => {
+    assert.equal(detectEtbTapped(null), false);
+  });
+
+  it('non-land oracle text that happens to contain "enters" → false', () => {
+    assert.equal(detectEtbTapped('Whenever a creature enters the battlefield, draw a card.'), false);
   });
 
 });

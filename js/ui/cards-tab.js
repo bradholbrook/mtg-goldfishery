@@ -1,5 +1,5 @@
 import { CARD_TYPES } from '../types.js';
-import { EFFECT_TYPES, EFFECT_TYPE_OPTIONS, TIMING_LABELS, CAST_FILTER_OPTIONS, getCastFilterKey } from '../effect-types.js';
+import { EFFECT_TYPES, EFFECT_TYPE_OPTIONS, TIMING_LABELS, TIMING_CHIP_LABELS, CAST_FILTER_OPTIONS, getCastFilterKey } from '../effect-types.js';
 import { TYPE_COLORS, escapeHtml } from './shared.js';
 
 export function buildCardsTab(deck, expandedEffectCards = new Set(), expandedTypeGroups = new Set()) {
@@ -43,8 +43,14 @@ function buildCardRow(card, expandedEffectCards = new Set()) {
   const userOverriddenKeys = new Set(
     allTags.filter(t => t.source === 'user').map(t => `${t.subtype}:${t.timing}`)
   );
+  const isLandType = card.types?.includes('Land');
   const isPureLand = card.types?.every(t => t.toLowerCase() === 'land' || t.toLowerCase() === 'mdfc');
-  const chips = allTags
+  // Land chip: shown on all Land-type cards (including MDFCs with a land face) as a
+  // simple type indicator. Uses TYPE_COLORS.Land to match the deck overview palette.
+  const landChip = isLandType
+    ? `<span class="effect-chip effect-chip--land">Land</span>`
+    : '';
+  const effectChips = allTags
     .filter(t => t.tier !== 'skip')
     .filter(t => !(t.source === 'auto' && userOverriddenKeys.has(`${t.subtype}:${t.timing}`)))
     // mana_rock on a land or MDFC is handled by the land pool — don't show it as a chip
@@ -54,12 +60,13 @@ function buildCardRow(card, expandedEffectCards = new Set()) {
       const base = typeInfo
         ? typeInfo.describe(t)
         : (t.value != null ? `${t.category}·${t.timing}·${t.value}` : `${t.category}·${t.timing}`);
-      const baseWithFilter = base + describeTriggerFilter(t.triggerFilter);
-      const label = t.tier === 'track_only' ? `${baseWithFilter} (track)` : baseWithFilter;
+      // Chip label: no "(track)" suffix — yellow color already communicates track_only tier
+      const label = base + describeTriggerFilter(t.triggerFilter);
       const sourceClass = t.source === 'user' ? ' effect-chip--user' : '';
       const tierClass = t.tier === 'simulatable_soon' ? 'track_only' : t.tier;
       return `<span class="effect-chip effect-chip--${tierClass}${sourceClass}">${label}</span>`;
     }).join('');
+  const chips = landChip + effectChips;
   const cmc = card.cmc != null
     ? `<span class="card-row-cmc">${card.cmc}</span>`
     : `<span class="card-row-cmc muted">—</span>`;
@@ -200,6 +207,12 @@ function describeTriggerFilter(tf) {
   if (tf.excludeTypes?.includes('Creature')) return ' [noncreature]';
   if (tf.spellTypes?.includes('Instant') && tf.spellTypes?.includes('Sorcery')) return ' [instant/sorcery]';
   if (tf.spellTypes?.length === 1) return ` [${tf.spellTypes[0].toLowerCase()}]`;
+  // Creature ETB condition filters (maxCmc, maxPower, nontoken)
+  const parts = [];
+  if (tf.maxCmc   != null) parts.push(`cmc≤${tf.maxCmc}`);
+  if (tf.maxPower != null) parts.push(`power≤${tf.maxPower}`);
+  if (tf.nontoken)         parts.push('nontoken');
+  if (parts.length)        return ` [${parts.join(', ')}]`;
   return '';
 }
 
@@ -226,18 +239,29 @@ function buildAutoTagRow(autoTag, cardNameAttr) {
 
 /**
  * Render an editable override row for an auto-detected tag.
- * Original auto value is shown read-only. User sets tier + EV override.
+ * All typed fields are editable (defaulting to auto-detected values).
+ * Auto-detected value shown as a read-only reference.
  */
 function buildOverrideRow(autoTag, userTag, fullIdx, cardNameAttr) {
   const typeInfo = EFFECT_TYPES[userTag.subtype];
-  const originalDesc = typeInfo ? typeInfo.describe(autoTag) : `${autoTag.subtype} @ ${autoTag.timing}`;
+  const subtypeLabel  = typeInfo?.label ?? userTag.subtype;
+  const timingLabel   = TIMING_LABELS[userTag.timing] ?? userTag.timing;
+  const detectedLabel = typeInfo ? typeInfo.describe(autoTag) + describeTriggerFilter(autoTag.triggerFilter) : '';
+
+  const fieldWidgets = (typeInfo?.fields ?? []).map(f =>
+    buildEffectFieldWidget(f, userTag, fullIdx, cardNameAttr)
+  ).join('');
 
   return `
     <div class="effect-tag-row effect-tag-row--override">
       <div class="effect-tag-row-fields">
-        <span class="effect-override-label">${escapeHtml(userTag.subtype)} @ ${escapeHtml(userTag.timing)}</span>
-        <span class="muted" style="font-size:11px" title="Auto-detected value">orig: ${escapeHtml(originalDesc)}</span>
-        ${buildTierControls(userTag, fullIdx, cardNameAttr)}
+        <div class="effect-override-header">
+          <span class="effect-override-label">${escapeHtml(subtypeLabel)}</span>
+          <span class="effect-override-timing">${escapeHtml(timingLabel)}</span>
+          ${detectedLabel ? `<span class="effect-override-detected">detected: ${escapeHtml(detectedLabel)}</span>` : ''}
+        </div>
+        ${buildSimulateCheckbox(userTag, fullIdx, cardNameAttr, typeInfo)}
+        ${fieldWidgets}
         ${buildTriggerFilterWidgets(userTag, fullIdx, cardNameAttr)}
       </div>
       <button class="btn-secondary btn-sm" data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
@@ -249,9 +273,9 @@ function buildOverrideRow(autoTag, userTag, fullIdx, cardNameAttr) {
 /**
  * Render an editable row for a user-added effect (not overriding any auto tag).
  * Timing dropdown excludes any (subtype, timing) pairs already covered by auto tags.
+ * When only one valid timing exists, shows it as a static label instead of a dropdown.
  */
 function buildUserAdditionRow(tag, fullIdx, cardNameAttr, isPermanent, autoCoveredKeys, coveredSubtypes) {
-  // Show only subtypes not already present on the card, plus the current one.
   const availableTypes = EFFECT_TYPE_OPTIONS.filter(et =>
     (!et.permanentOnly || isPermanent) &&
     (!coveredSubtypes.has(et.id) || et.id === tag.subtype)
@@ -265,29 +289,32 @@ function buildUserAdditionRow(tag, fullIdx, cardNameAttr, isPermanent, autoCover
     </select>`;
 
   const typeInfo = EFFECT_TYPES[tag.subtype];
-  // Exclude timings already covered by an auto tag for this subtype
   const validTimings = (typeInfo?.validTimings ?? ['etb', 'upkeep', 'cast', 'tap', 'death', 'on_resolution'])
     .filter(tm => !autoCoveredKeys.has(`${tag.subtype}:${tm}`));
-  const timingSelect = `
-    <select class="select select-sm" data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
-      onchange="window.__eff.setTiming(this.dataset.cardName, Number(this.dataset.tagIdx), this.value)">
-      ${validTimings.map(tm =>
-        `<option value="${tm}" ${tm === tag.timing ? 'selected' : ''}>${TIMING_LABELS[tm] ?? tm}</option>`
-      ).join('')}
-    </select>`;
+
+  // Single valid timing: show as a read-only label rather than a one-option dropdown
+  const timingControl = validTimings.length <= 1
+    ? `<span class="effect-timing-label">${escapeHtml(TIMING_LABELS[validTimings[0] ?? tag.timing] ?? tag.timing)}</span>`
+    : `<select class="select select-sm" data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
+        onchange="window.__eff.setTiming(this.dataset.cardName, Number(this.dataset.tagIdx), this.value)">
+        ${validTimings.map(tm =>
+          `<option value="${tm}" ${tm === tag.timing ? 'selected' : ''}>${TIMING_LABELS[tm] ?? tm}</option>`
+        ).join('')}
+      </select>`;
 
   const fieldWidgets = (typeInfo?.fields ?? []).map(f =>
     buildEffectFieldWidget(f, tag, fullIdx, cardNameAttr)
   ).join('');
 
+  // Field order: subtype → timing → simulate → fields → filter
   return `
     <div class="effect-tag-row">
       <div class="effect-tag-row-fields">
         ${subtypeSelect}
-        ${timingSelect}
+        ${timingControl}
+        ${buildSimulateCheckbox(tag, fullIdx, cardNameAttr, typeInfo)}
         ${fieldWidgets}
         ${buildTriggerFilterWidgets(tag, fullIdx, cardNameAttr)}
-        ${buildTierControls(tag, fullIdx, cardNameAttr)}
       </div>
       <button class="btn-icon btn-danger effect-tag-remove" data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
         onclick="window.__eff.remove(this.dataset.cardName, Number(this.dataset.tagIdx))"
@@ -328,31 +355,23 @@ function buildTriggerFilterWidgets(tag, tagIdx, cardNameAttr) {
 }
 
 /**
- * Render tier-select + expected-value input for a user tag.
- * Always shown (not gated on isConditional).
+ * Render a "Simulate" checkbox for a user tag.
+ * Only shown for effect types that the simulator can actually run (defaultTier === 'simulatable').
+ * Types that can't be simulated yet (land_ramp, ritual) show a static "Track only" label.
  */
-function buildTierControls(tag, fullIdx, cardNameAttr) {
-  const tierSelect = `
-    <select class="select select-sm" data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
-      onchange="window.__eff.setTier(this.dataset.cardName, Number(this.dataset.tagIdx), this.value)"
-      title="Simulation mode">
-      <option value="track_only"  ${tag.tier === 'track_only'  ? 'selected' : ''}>Track only</option>
-      <option value="simulatable" ${tag.tier === 'simulatable' ? 'selected' : ''}>Simulate</option>
-    </select>`;
-  // EV is only meaningful when the tag is actively simulated.
-  // on_resolution fires once per cast; other timings fire per trigger event.
-  const evLabel = tag.timing === 'on_resolution' ? 'Draws on cast' : 'Draws/trigger';
-  const evInput = tag.tier === 'simulatable'
-    ? `<label class="effect-field-label">${evLabel}
-        <input type="number" class="input-number" style="width:52px"
-          value="${tag.expectedValue ?? ''}" step="1" min="0" max="20"
-          placeholder="${tag.value ?? 1}"
-          data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}" data-field-key="expectedValue"
-          oninput="window.__eff.setField(this.dataset.cardName, Number(this.dataset.tagIdx), this.dataset.fieldKey, this.value === '' ? null : Math.floor(Number(this.value)))"
-          title="How many cards to draw each time this effect fires. Blank = use auto-detected value." />
-      </label>`
-    : '';
-  return tierSelect + evInput;
+function buildSimulateCheckbox(tag, fullIdx, cardNameAttr, typeInfo) {
+  const canSimulate = typeInfo?.defaultTier === 'simulatable';
+  if (!canSimulate) {
+    return `<span class="effect-timing-label">Track only</span>`;
+  }
+  const checked = tag.tier === 'simulatable' ? 'checked' : '';
+  return `
+    <label class="type-checkbox-label" style="gap:5px;white-space:nowrap">
+      <input type="checkbox" ${checked}
+        data-card-name="${cardNameAttr}" data-tag-idx="${fullIdx}"
+        onchange="window.__eff.setTier(this.dataset.cardName, Number(this.dataset.tagIdx), this.checked ? 'simulatable' : 'track_only')" />
+      Simulate
+    </label>`;
 }
 
 /**
@@ -366,7 +385,7 @@ function buildEffectFieldWidget(field, tag, tagIdx, cardNameAttr) {
       <label class="effect-field-label">${field.label}
         <input type="number" class="input-number"
           value="${val ?? field.default ?? 1}"
-          min="${field.min ?? 1}" max="${field.max ?? 99}"
+          min="${field.min ?? 0}" max="${field.max ?? 99}" step="${field.step ?? 1}"
           data-card-name="${cardNameAttr}" data-tag-idx="${tagIdx}" data-field-key="${field.key}"
           oninput="window.__eff.setField(this.dataset.cardName, Number(this.dataset.tagIdx), this.dataset.fieldKey, Number(this.value))" />
       </label>`;

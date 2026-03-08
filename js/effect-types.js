@@ -10,6 +10,31 @@
  * Exported: EFFECT_TYPES (object keyed by subtype id), EFFECT_TYPE_OPTIONS (array)
  */
 
+/**
+ * Short timing labels used inside effect chips (space is tight).
+ * null = no suffix (timing implied by describe() format or is implicit).
+ */
+export const TIMING_CHIP_LABELS = {
+  etb:           'ETB',
+  land_etb:      'landfall',
+  creature_etb:  'creature ETB',
+  upkeep:        'upkeep',
+  cast:          'on cast',
+  draw_step:     'draw step',
+  on_draw:       'on draw',
+  end_step:      'end step',
+  on_resolution: null,        // instant/sorcery — timing is implicit
+  opponent_cast: 'opp cast',
+  opponent_draw: 'opp draw',
+  attack:        'attack',
+  combat_damage: 'damage',
+  sacrifice:     'sacrifice',
+  death:         'death',
+  tap:           null,        // "tap: X" prefix already in describe()
+  static:        null,        // always-on, no timing annotation needed
+  passive:       null,        // legacy alias
+};
+
 export const EFFECT_TYPES = {
 
   draw_n: {
@@ -20,14 +45,23 @@ export const EFFECT_TYPES = {
     permanentOnly: false,
     defaultTier:   'simulatable',
     fields: [
-      { key: 'value', widget: 'number', label: 'Cards', min: 1, max: 20, default: 1 },
+      // min: 0 and step: 0.1 allow fractional "expected draws per trigger" for conditional effects
+      { key: 'value', widget: 'number', label: 'Cards/trigger', min: 0, max: 20, step: 0.1, default: 1 },
     ],
-    defaultValues: () => ({ value: 1, expectedValue: null }),
+    defaultValues: () => ({ value: 1 }),
     describe(tag) {
-      const cond = tag.isConditional ? ' (may)' : '';
-      const v    = tag.expectedValue != null ? Math.floor(tag.expectedValue) : (tag.value ?? 1);
-      if (tag.timing === 'on_resolution') return `draw ${v}${cond}`;
-      return `draw ${v}${cond}   ${tag.timing}`;
+      const v = tag.value == null
+        ? (tag.condition === 'draw X' ? 'X' : '?')
+        : tag.value;
+      let cond = '';
+      if (tag.isConditional) {
+        if (tag.condition === 'mana_payment') cond = ' [pay]';
+        else if (tag.condition === 'life_payment') cond = ' [life]';
+        else cond = '?';
+      }
+      const chipTiming = TIMING_CHIP_LABELS[tag.timing];
+      if (chipTiming == null) return `draw ${v}${cond}`;
+      return `draw ${v}${cond} · ${chipTiming}`;
     },
   },
 
@@ -39,16 +73,17 @@ export const EFFECT_TYPES = {
     permanentOnly: false,
     defaultTier:   'simulatable',
     fields: [
-      { key: 'value',        widget: 'number', label: 'Draw',    min: 1, max: 10, default: 1 },
-      { key: 'discardCount', widget: 'number', label: 'Discard', min: 1, max: 10, default: 1 },
+      { key: 'value',        widget: 'number', label: 'Draw',    min: 0, max: 10, step: 1, default: 1 },
+      { key: 'discardCount', widget: 'number', label: 'Discard', min: 0, max: 10, step: 1, default: 1 },
     ],
     defaultValues: () => ({ value: 1, discardCount: 1, isAdditionalCost: false }),
     describe(tag) {
       const v = tag.value ?? 1;
       const d = tag.discardCount ?? 1;
       const cost = tag.isAdditionalCost ? ' (cost)' : '';
-      if (tag.timing === 'on_resolution') return `loot draw ${v} / discard ${d}${cost}`;
-      return `loot draw ${v} / discard ${d}${cost} @ ${tag.timing}`;
+      const chipTiming = TIMING_CHIP_LABELS[tag.timing];
+      if (chipTiming == null) return `loot ${v}/${d}${cost}`;
+      return `loot ${v}/${d}${cost} · ${chipTiming}`;
     },
   },
 
@@ -80,8 +115,7 @@ export const EFFECT_TYPES = {
     ],
     defaultValues: () => ({ value: 1 }),
     describe(tag) {
-      const v = tag.expectedValue != null ? Math.floor(tag.expectedValue) : (tag.value ?? 1);
-      return `tap: +${v} mana`;
+      return `tap: +${tag.value ?? 1} mana`;
     },
   },
 
@@ -97,8 +131,27 @@ export const EFFECT_TYPES = {
     ],
     defaultValues: () => ({ value: 1 }),
     describe(tag) {
-      const v = tag.expectedValue != null ? Math.floor(tag.expectedValue) : (tag.value ?? 1);
-      return `${tag.timing}: fetch ${v} land(s)`;
+      const v = tag.value ?? 1;
+      const chipTiming = TIMING_CHIP_LABELS[tag.timing] ?? tag.timing;
+      return `ramp ${v} land${v !== 1 ? 's' : ''} · ${chipTiming}`;
+    },
+  },
+
+  draw_replacement: {
+    id:            'draw_replacement',
+    label:         'Draw replacement (doubles draws)',
+    category:      'replacement',
+    validTimings:  ['static'],
+    permanentOnly: true,
+    defaultTier:   'simulatable',
+    fields: [
+      { key: 'multiplier',  widget: 'number',   label: 'Multiplier',             min: 2, max: 4, default: 2 },
+      { key: 'exceptFirst', widget: 'checkbox', label: 'Except first draw/turn', default: false },
+    ],
+    defaultValues: () => ({ multiplier: 2, exceptFirst: false }),
+    describe(tag) {
+      const ex = tag.exceptFirst ? ' (except first/turn)' : '';
+      return `draw ×${tag.multiplier ?? 2}${ex}`;
     },
   },
 
@@ -114,8 +167,39 @@ export const EFFECT_TYPES = {
     ],
     defaultValues: () => ({ value: 3 }),
     describe(tag) {
-      const v = tag.expectedValue != null ? Math.floor(tag.expectedValue) : (tag.value ?? 3);
-      return `cast: +${v} mana (ritual)`;
+      return `+${tag.value ?? 3} mana · on cast`;
+    },
+  },
+
+  tutor: {
+    id:            'tutor',
+    label:         'Tutor (search library)',
+    category:      'tutor',
+    validTimings:  ['etb', 'creature_etb', 'upkeep', 'cast', 'on_resolution', 'sacrifice', 'death'],
+    permanentOnly: false,
+    defaultTier:   'simulatable',
+    fields:        [],
+    defaultValues: () => ({
+      putWhere:  'hand',
+      fetchType: { any: true, nonland: false, supertype: null, type: null, subtypes: null },
+    }),
+    describe(tag) {
+      const fc = tag.fetchType;
+      let what = 'any';
+      if (fc && !fc.any) {
+        const parts = [];
+        if (fc.supertype) parts.push(fc.supertype.toLowerCase());
+        if (fc.nonland)   parts.push('nonland');
+        if (fc.subtype)   parts.push(fc.subtype.toLowerCase());
+        else if (fc.type) parts.push(fc.type === 'InstantOrSorcery' ? 'instant/sorc' : fc.type.toLowerCase());
+        if (parts.length) what = parts.join(' ');
+      }
+      const where = tag.putWhere === 'battlefield' ? '→BF'
+        : tag.putWhere === 'top_of_library' ? '→top'
+        : '→hand';
+      const chipTiming = TIMING_CHIP_LABELS[tag.timing];
+      if (chipTiming == null) return `tutor ${what} ${where}`;
+      return `tutor ${what} ${where} · ${chipTiming}`;
     },
   },
 
@@ -142,6 +226,7 @@ export const TIMING_LABELS = {
   combat_damage:  'Triggered: Combat damage',
   sacrifice:      'Triggered: Sacrifice',
   tap:            'Activated: Tap',
+  static:         'Static (always-on)',
   passive:        'On resolution (legacy)',
 };
 

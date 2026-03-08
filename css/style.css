@@ -869,6 +869,25 @@ textarea.input-text {
   cursor: grab;
 }
 
+.cast-rule-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  padding: 4px 6px;
+  border-radius: var(--radius);
+  border: 1px solid transparent;
+  cursor: grab;
+  user-select: none;
+}
+
+.cast-rule-row:active { cursor: grabbing; }
+
+.cast-rule-row.cast-drag-over {
+  border-color: var(--accent);
+  background: var(--accent-glow);
+}
+
 .select-sm {
   font-size: 11px;
   padding: 5px 26px 5px 8px;
@@ -1015,6 +1034,8 @@ textarea.input-text {
 /* ─── Effect Chip Variants ──────────────────────────────────────────────────── */
 .effect-chip--simulatable_soon { color: #60a5fa; border-color: rgba(96,165,250,0.3); background: rgba(96,165,250,0.08); }
 .effect-chip--user { outline: 1px solid currentColor; outline-offset: 1px; }
+/* Land chip: type indicator using TYPE_COLORS.Land (#a0845c) */
+.effect-chip--land { color: #a0845c; border-color: rgba(160,132,92,0.4); background: rgba(160,132,92,0.08); }
 
 /* ─── Card Image Preview (floating, follows cursor) ─────────────────────────── */
 #card-image-preview {
@@ -1112,11 +1133,39 @@ textarea.input-text {
 }
 .btn-effect-override:hover { color: var(--accent); border-color: var(--accent-dim); }
 
+/* Override row header: subtype label + timing + detected reference on one line */
+.effect-override-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-basis: 100%;   /* force to its own flex row */
+  flex-shrink: 0;
+}
 .effect-override-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--text);
+  white-space: nowrap;
+}
+.effect-override-timing {
   font-size: 11px;
   color: var(--text-muted);
   white-space: nowrap;
+}
+.effect-override-detected {
+  font-size: 10px;
+  color: var(--text-muted);
   font-style: italic;
+  white-space: nowrap;
+}
+/* Static timing label shown when only one valid timing exists (e.g. mana_rock → Tap) */
+.effect-timing-label {
+  font-size: 11px;
+  color: var(--text-muted);
+  white-space: nowrap;
+  padding: 3px 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
 }
 
 .effect-tag-row--override {

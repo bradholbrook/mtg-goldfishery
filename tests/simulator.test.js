@@ -272,6 +272,67 @@ describe('runSimulation — enriched deck (turn-by-turn)', () => {
     );
   });
 
+  it('draw_replacement doubles the normal draw step after Archive enters', () => {
+    // Archive costs 5 — enters around turn 5.
+    // After it enters, each draw step should give 2 cards instead of 1.
+    // Deck: 50 lands + 10 Archives (to ensure one is in hand early).
+    const archive = makeCard({
+      name: 'Alhammarret\'s Archive',
+      types: ['Artifact'],
+      cmc: 5,
+      effectTags: [{
+        category: 'replacement', subtype: 'draw_replacement', timing: 'static',
+        multiplier: 2, exceptFirst: false, isConditional: false, tier: 'simulatable', source: 'auto',
+      }],
+      quantity: 10,
+    });
+    const land = makeCard({ name: 'Forest', types: ['Land'], cmc: 0, effectTags: [], quantity: 50 });
+    const deck = makeDeck([archive, land], { enriched: true });
+    const { summary } = runSimulation(deck, 2000);
+    // By turn 10 with 2× draw step, cumulative draws >> turn 10 without amplification.
+    // Baseline without Archive: 7 + 10 = 17 by turn 10.
+    // With Archive after turn 5: 7 + 5 + ~10 (doubled for turns 6-10) ≈ 27.
+    assert.ok(
+      summary.avgCardsDrawnByTurn[10] > 19,
+      `Expected >19 cards drawn by turn 10 with Archive doubling, got ${summary.avgCardsDrawnByTurn[10]}`,
+    );
+  });
+
+  it('draw_replacement with exceptFirst: does not double the first draw, does double subsequent draws', () => {
+    // Teferi's Ageless Insight: except the first draw each turn, draw two cards instead.
+    // Give the deck an upkeep draw (Howling Mine style) — that's the second draw.
+    // The upkeep draw fires before the normal draw step. cardsDrawnThisTurn = 0 → no multiplier.
+    // Then the normal draw step fires: cardsDrawnThisTurn = 1 → multiplier applies → 2 cards.
+    const insight = makeCard({
+      name: "Teferi's Ageless Insight",
+      types: ['Enchantment'],
+      cmc: 4,
+      effectTags: [{
+        category: 'replacement', subtype: 'draw_replacement', timing: 'static',
+        multiplier: 2, exceptFirst: true, isConditional: false, tier: 'simulatable', source: 'auto',
+      }],
+      quantity: 10,
+    });
+    const upkeepDrawer = makeCard({
+      name: 'Upkeep Drawer',
+      types: ['Artifact'],
+      cmc: 2,
+      effectTags: [{
+        category: 'draw', subtype: 'draw_n', timing: 'upkeep',
+        value: 1, isConditional: false, condition: null, tier: 'simulatable', source: 'auto',
+      }],
+      quantity: 10,
+    });
+    const land = makeCard({ name: 'Forest', types: ['Land'], cmc: 0, effectTags: [], quantity: 40 });
+    const deck = makeDeck([insight, upkeepDrawer, land], { enriched: true });
+    const { summary } = runSimulation(deck, 2000);
+    // Should draw more than baseline (7 + 10 = 17 by turn 10) due to doubling.
+    assert.ok(
+      summary.avgCardsDrawnByTurn[10] > 19,
+      `Expected >19 by turn 10 with Teferi's Insight, got ${summary.avgCardsDrawnByTurn[10]}`,
+    );
+  });
+
   it('MDFC-only deck plays a land drop each turn via the land face', () => {
     // When no pure land is in hand, the MDFC land-back should be played.
     // avgCardsDrawnByTurn[1] >= 8 means simulation ran (7 opening + at least 1 draw step).

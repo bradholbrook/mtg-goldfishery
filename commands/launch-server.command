@@ -3,7 +3,7 @@
 # Starts the dev server if not already running, then opens the browser.
 
 PORT=8080
-DIR="$(cd "$(dirname "$0")" && pwd)"
+DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 if lsof -i :$PORT -sTCP:LISTEN -t > /dev/null 2>&1; then
     echo "Server already running on port $PORT — restarting..."

@@ -5,6 +5,8 @@ import { escapeHtml } from './shared.js';
 
 export function buildConfigTab(deck, editingDef) {
   return buildGoodHandSection(deck, editingDef, getResultsForDeck(deck.id))
+    + buildCastPrioritySection(deck)
+    + buildTutorPrioritySection(deck)
     + buildDiscardPrioritySection(deck)
     + buildXCostSection(deck)
     + buildOpponentProfileSection(deck);
@@ -140,6 +142,258 @@ function buildCriterionRow(crit, idx, deck) {
       ${typeSelect}
       ${fieldWidgets}
       <button class="btn-icon btn-danger" onclick="window.__ghh.removeCrit(${idx})" title="Remove">✕</button>
+    </div>`;
+}
+
+// ─── Cast Priority Rules Section ──────────────────────────────────────────────
+
+const CAST_RULE_MATCH_OPTIONS = [
+  { value: 'named',           label: 'Named Card' },
+  { value: 'type',            label: 'Card Type' },
+  { value: 'subtype',         label: 'Card Subtype' },
+  { value: 'effect_category', label: 'Effect Category' },
+];
+
+const EFFECT_CATEGORY_OPTIONS = ['draw', 'ramp', 'tutor', 'removal', 'token', 'other'];
+
+/**
+ * A single-select card picker styled like the cards_multiselect dropdown.
+ * Selecting a card calls window.__cpr.pickCard() which refreshes and closes the panel.
+ */
+function buildNamedCardWidget(ruleIdx, selectedName, deck) {
+  const cardMap = Object.fromEntries(deck.cards.map(c => [c.name, c]));
+  const names = [...new Set(deck.cards.map(c => c.name))].sort();
+  const summaryText = selectedName || 'Select card…';
+
+  const items = names.map(n => {
+    const isSelected = n === selectedName;
+    const imgUrl  = escapeHtml(cardMap[n]?.imageUrl     || '');
+    const backUrl = escapeHtml(cardMap[n]?.backImageUrl || '');
+    const nameArg = JSON.stringify(n).replace(/"/g, '&quot;');
+    return `<label class="type-checkbox-label ${isSelected ? 'card-option--selected' : ''}"
+      data-image-url="${imgUrl}" data-back-image-url="${backUrl}"
+      onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
+      onmouseleave="window.__preview?.hide()">
+      <span class="card-option-check">${isSelected ? '✓' : ''}</span>
+      <span onclick="window.__cpr.pickCard(${ruleIdx}, ${nameArg})">${escapeHtml(n)}</span>
+    </label>`;
+  }).join('');
+
+  return `
+    <details class="card-multiselect-dropdown">
+      <summary class="card-multiselect-toggle">${escapeHtml(summaryText)}</summary>
+      <div class="card-multiselect-list">${items}</div>
+    </details>`;
+}
+
+function buildCastPrioritySection(deck) {
+  const rules = deck.castPriorityRules || [];
+
+  const rowsHTML = rules.map((rule, idx) => {
+    const matchOpts = CAST_RULE_MATCH_OPTIONS.map(o =>
+      `<option value="${o.value}" ${rule.match === o.value ? 'selected' : ''}>${o.label}</option>`
+    ).join('');
+
+    let targetWidget = '';
+    if (rule.match === 'type') {
+      const typeOpts = CARD_TYPES.filter(t => t !== 'MDFC' && t !== 'Other').map(t =>
+        `<option value="${t}" ${rule.cardType === t ? 'selected' : ''}>${t}</option>`
+      ).join('');
+      targetWidget = `<select class="select select-sm" onchange="window.__cpr.setField(${idx},'cardType',this.value)">${typeOpts}</select>`;
+    } else if (rule.match === 'effect_category') {
+      const catOpts = EFFECT_CATEGORY_OPTIONS.map(c =>
+        `<option value="${c}" ${rule.effectCategory === c ? 'selected' : ''}>${c}</option>`
+      ).join('');
+      targetWidget = `<select class="select select-sm" onchange="window.__cpr.setField(${idx},'effectCategory',this.value)">${catOpts}</select>`;
+    } else if (rule.match === 'subtype') {
+      targetWidget = `<input type="text" class="input-text" style="flex:1;min-width:0"
+        placeholder="Subtype (e.g. Elf, Equipment)"
+        value="${escapeHtml(rule.cardSubtype || '')}"
+        oninput="window.__cpr.setField(${idx},'cardSubtype',this.value)" />`;
+    } else {
+      targetWidget = buildNamedCardWidget(idx, rule.cardName || '', deck);
+    }
+
+    return `
+      <div class="cast-rule-row"
+        draggable="true"
+        ondragstart="window.__cpr.dragStart(${idx})"
+        ondragover="event.preventDefault()"
+        ondrop="window.__cpr.drop(${idx})"
+        ondragenter="this.classList.add('cast-drag-over')"
+        ondragleave="this.classList.remove('cast-drag-over')"
+        ondragend="document.querySelectorAll('.cast-drag-over').forEach(el=>el.classList.remove('cast-drag-over'))">
+        <span class="drag-handle" title="Drag to reorder">⠿</span>
+        <select class="select select-sm" onchange="window.__cpr.setMatch(${idx},this.value)">
+          ${matchOpts}
+        </select>
+        ${targetWidget}
+        <button class="btn-icon btn-danger" onclick="window.__cpr.remove(${idx})" title="Remove">✕</button>
+      </div>`;
+  }).join('');
+
+  const listHTML = rules.length === 0
+    ? `<p class="muted" style="font-size:12px;margin-bottom:8px">No rules — cards are cast by effect category order.</p>`
+    : `<div id="cast-rule-list">${rowsHTML}</div>`;
+
+  return `
+    <div class="section" style="margin-top:16px">
+      <div class="section-label">Cast Priority Rules</div>
+      <p class="muted" style="font-size:12px;margin-bottom:8px">
+        Override casting order. Rules are checked top-to-bottom; first match wins. Unmatched cards fall through to category ordering.
+      </p>
+      ${listHTML}
+      <button class="btn-secondary btn-sm" style="margin-top:6px" onclick="window.__cpr.add()">+ Add Rule</button>
+    </div>`;
+}
+
+// ─── Tutor Priority Rules Section ─────────────────────────────────────────────
+
+const TUTOR_TARGET_OPTIONS = [
+  { value: 'named',           label: 'Named Card' },
+  { value: 'type',            label: 'Card Type' },
+  { value: 'subtype',         label: 'Card Subtype' },
+  { value: 'effect_category', label: 'Effect Category' },
+];
+
+/**
+ * Single-select card picker for tutor priority rules.
+ * Selecting a card calls window.__tpr.pickCard().
+ */
+function buildTutorCardWidget(ruleIdx, selectedName, deck) {
+  const cardMap = Object.fromEntries(deck.cards.map(c => [c.name, c]));
+  const names = [...new Set(deck.cards.map(c => c.name))].sort();
+  const summaryText = selectedName || 'Select card…';
+
+  const items = names.map(n => {
+    const isSelected = n === selectedName;
+    const imgUrl  = escapeHtml(cardMap[n]?.imageUrl     || '');
+    const backUrl = escapeHtml(cardMap[n]?.backImageUrl || '');
+    const nameArg = JSON.stringify(n).replace(/"/g, '&quot;');
+    return `<label class="type-checkbox-label ${isSelected ? 'card-option--selected' : ''}"
+      data-image-url="${imgUrl}" data-back-image-url="${backUrl}"
+      onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
+      onmouseleave="window.__preview?.hide()">
+      <span class="card-option-check">${isSelected ? '✓' : ''}</span>
+      <span onclick="window.__tpr.pickCard(${ruleIdx}, ${nameArg})">${escapeHtml(n)}</span>
+    </label>`;
+  }).join('');
+
+  return `
+    <details class="card-multiselect-dropdown">
+      <summary class="card-multiselect-toggle">${escapeHtml(summaryText)}</summary>
+      <div class="card-multiselect-list">${items}</div>
+    </details>`;
+}
+
+function buildTutorPrioritySection(deck) {
+  const rules = deck.tutorPriorityRules || [];
+
+  // Find cards in this deck that have a simulatable tutor effect
+  const tutorCards = (deck.cards || []).filter(c =>
+    c.effectTags?.some(t => t.category === 'tutor' && t.tier === 'simulatable')
+  );
+
+  if (tutorCards.length === 0) return '';
+
+  // Check if any tutor card has no matching rule (warn user)
+  const hasUnconfigured = tutorCards.length > 0 && rules.length === 0;
+
+  const tutorChips = tutorCards.map(c => {
+    const tag = c.effectTags.find(t => t.category === 'tutor' && t.tier === 'simulatable');
+    const fc = tag?.fetchType;
+    let what = 'any';
+    if (fc && !fc.any) {
+      const parts = [];
+      if (fc.supertype) parts.push(fc.supertype.toLowerCase());
+      if (fc.nonland)   parts.push('nonland');
+      if (fc.subtype)   parts.push(fc.subtype.toLowerCase());
+      else if (fc.type) parts.push(fc.type === 'InstantOrSorcery' ? 'instant/sorc' : fc.type.toLowerCase());
+      if (parts.length) what = parts.join(' ');
+    }
+    const where = tag?.putWhere === 'battlefield' ? '→BF'
+      : tag?.putWhere === 'top_of_library' ? '→top'
+      : '→hand';
+    return `<span class="effect-chip effect-chip--simulatable"
+      data-image-url="${escapeHtml(c.imageUrl || '')}"
+      data-back-image-url="${escapeHtml(c.backImageUrl || '')}"
+      onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
+      onmouseleave="window.__preview?.hide()">${escapeHtml(c.name)} <span class="muted">${what} ${where}</span></span>`;
+  }).join(' ');
+
+  const rowsHTML = rules.map((rule, idx) => {
+    const targetOpts = TUTOR_TARGET_OPTIONS.map(o =>
+      `<option value="${o.value}" ${rule.target === o.value ? 'selected' : ''}>${o.label}</option>`
+    ).join('');
+
+    let targetWidget = '';
+    if (rule.target === 'type') {
+      const typeOpts = CARD_TYPES.filter(t => t !== 'MDFC' && t !== 'Other').map(t =>
+        `<option value="${t}" ${rule.cardType === t ? 'selected' : ''}>${t}</option>`
+      ).join('');
+      targetWidget = `<select class="select select-sm" onchange="window.__tpr.setField(${idx},'cardType',this.value)">${typeOpts}</select>`;
+    } else if (rule.target === 'effect_category') {
+      const catOpts = EFFECT_CATEGORY_OPTIONS.map(c =>
+        `<option value="${c}" ${rule.effectCategory === c ? 'selected' : ''}>${c}</option>`
+      ).join('');
+      targetWidget = `<select class="select select-sm" onchange="window.__tpr.setField(${idx},'effectCategory',this.value)">${catOpts}</select>`;
+    } else if (rule.target === 'subtype') {
+      targetWidget = `<input type="text" class="input-text" style="flex:1;min-width:0"
+        placeholder="Subtype (e.g. Forest, Wizard)"
+        value="${escapeHtml(rule.cardSubtype || '')}"
+        oninput="window.__tpr.setField(${idx},'cardSubtype',this.value)" />`;
+    } else {
+      targetWidget = buildTutorCardWidget(idx, rule.cardName || '', deck);
+    }
+
+    // Named card rules always skip-if-in-hand (enforced in simulator), no checkbox needed.
+    // Other rule types show an optional checkbox.
+    const notInHandCheckbox = rule.target !== 'named'
+      ? `<label class="effect-field-label" style="margin:0;white-space:nowrap;font-size:11px"
+          title="Skip this rule if a matching card is already in hand">
+          <input type="checkbox" ${rule.requireNotInHand ? 'checked' : ''}
+            onchange="window.__tpr.setField(${idx},'requireNotInHand',this.checked)" />
+          skip if in hand
+        </label>`
+      : '';
+
+    return `
+      <div class="cast-rule-row"
+        draggable="true"
+        ondragstart="window.__tpr.dragStart(${idx})"
+        ondragover="event.preventDefault()"
+        ondrop="window.__tpr.drop(${idx})"
+        ondragenter="this.classList.add('cast-drag-over')"
+        ondragleave="this.classList.remove('cast-drag-over')"
+        ondragend="document.querySelectorAll('.cast-drag-over').forEach(el=>el.classList.remove('cast-drag-over'))">
+        <span class="drag-handle" title="Drag to reorder">⠿</span>
+        <select class="select select-sm" onchange="window.__tpr.setTarget(${idx},this.value)">
+          ${targetOpts}
+        </select>
+        ${targetWidget}
+        ${notInHandCheckbox}
+        <button class="btn-icon btn-danger" onclick="window.__tpr.remove(${idx})" title="Remove">✕</button>
+      </div>`;
+  }).join('');
+
+  const listHTML = rules.length === 0
+    ? `<p class="muted" style="font-size:12px;margin-bottom:8px">No rules — tutor cards won't be cast during simulation.</p>`
+    : `<div id="tutor-rule-list">${rowsHTML}</div>`;
+
+  const warnHTML = hasUnconfigured
+    ? `<p class="muted" style="font-size:12px;margin-bottom:8px;color:var(--warning)">⚠ Add at least one rule so tutors are castable in simulation.</p>`
+    : '';
+
+  return `
+    <div class="section" style="margin-top:16px">
+      <div class="section-label">Tutor Priority Rules</div>
+      <div style="margin-bottom:8px">${tutorChips}</div>
+      <p class="muted" style="font-size:12px;margin-bottom:6px">
+        Rules tell the simulator what to search for when a tutor resolves. Evaluated top-to-bottom; first rule with a valid library target wins.
+      </p>
+      ${warnHTML}
+      ${listHTML}
+      <button class="btn-secondary btn-sm" style="margin-top:6px" onclick="window.__tpr.add()">+ Add Rule</button>
     </div>`;
 }
 
@@ -281,6 +535,9 @@ function buildOpponentProfileSection(deck) {
       ${numInput('opponentNoncreatureSpellsPerRound', noncreat,   'Opponent noncreature spells','Noncreature spells cast by all opponents per round (Rhystic Study, Mystic Remora)')}
       <p class="muted" style="font-size:11px;margin-top:6px">
         Any-spell triggers (e.g. Rhystic Study) fire creature + noncreature total times per round.
+        For cards where opponents can pay to prevent the draw (like Rhystic Study), override the
+        <em>Cards/trigger</em> value to a fraction (e.g. 0.7 = they don't pay 70% of the time).
+        These two settings multiply: 0.7 × 6 spells/round = 4.2 expected draws/round.
       </p>
     </div>`;
 }

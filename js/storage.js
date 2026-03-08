@@ -170,6 +170,19 @@ function mergeLoadedData(data) {
   if (Array.isArray(data.decks)) {
     for (const deck of data.decks) {
       if (deck && deck.id && deck.cards) {
+        // Migrate: auto-detected opponent_cast/draw draw tags that previously saved as
+        // track_only (before the simulatable fix) should now be simulatable when the
+        // detection criteria are met (concrete, non-conditional value ≥ 1).
+        for (const card of deck.cards) {
+          for (const tag of (card.effectTags ?? [])) {
+            if (tag.source !== 'auto') continue;
+            if (tag.category !== 'draw') continue;
+            if (!['opponent_cast', 'opponent_draw'].includes(tag.timing)) continue;
+            if (!tag.isConditional && tag.value != null && tag.value >= 1) {
+              tag.tier = 'simulatable';
+            }
+          }
+        }
         addDeck(deck);
         decksLoaded++;
       } else {
@@ -246,6 +259,28 @@ export function updateDeckDiscardPriorities(deckId, priorities) {
   const deck = appState.decks.find(d => d.id === deckId);
   if (!deck) return;
   deck.discardPriorities = priorities;
+}
+
+// ─── Cast Priority Rules ──────────────────────────────────────────────────────
+
+/**
+ * Replace the full castPriorityRules array on a deck.
+ */
+export function updateDeckCastPriorityRules(deckId, rules) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.castPriorityRules = rules;
+}
+
+// ─── Tutor Priority Rules ─────────────────────────────────────────────────────
+
+/**
+ * Replace the full tutorPriorityRules array on a deck.
+ */
+export function updateDeckTutorPriorityRules(deckId, rules) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.tutorPriorityRules = rules;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────

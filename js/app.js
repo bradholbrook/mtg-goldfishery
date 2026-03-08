@@ -12,6 +12,8 @@ import {
   getDeckById, saveToFile, loadFromFile,
   updateDeckGoodHandDefs, removeGoodHandDef,
   updateDeckDiscardPriorities,
+  updateDeckCastPriorityRules,
+  updateDeckTutorPriorityRules,
   updateDeckXCost,
   renameDeck,
 } from './storage.js';
@@ -133,8 +135,9 @@ function bindImportPanel() {
       importBtn.textContent = '⏳ Fetching…';
 
       try {
-        const apiUrl = `https://api2.moxfield.com/v2/decks/all/${publicId}`;
-        const res = await fetch(CORS_PROXY + encodeURIComponent(apiUrl));
+        // Append timestamp so corsproxy.io sees a unique URL each import (bypasses proxy cache)
+        const apiUrl = `https://api2.moxfield.com/v2/decks/all/${publicId}?_t=${Date.now()}`;
+        const res = await fetch(CORS_PROXY + encodeURIComponent(apiUrl), { cache: 'no-store' });
         if (!res.ok) throw new Error(`Moxfield returned HTTP ${res.status}`);
 
         const apiData = await res.json();
@@ -467,6 +470,149 @@ window.__disc = {
   },
 };
 
+// ─── Cast Priority Rule Actions ───────────────────────────────────────────────
+
+window.__cpr = {
+  _dragSrc: null,
+
+  add() {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    if (!Array.isArray(deck.castPriorityRules)) deck.castPriorityRules = [];
+    deck.castPriorityRules.push({
+      id: generateId(), match: 'named',
+      cardName: '', cardType: 'Land', cardSubtype: '', effectCategory: 'draw',
+    });
+    updateDeckCastPriorityRules(deck.id, deck.castPriorityRules);
+    refresh();
+  },
+
+  remove(idx) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    deck.castPriorityRules = (deck.castPriorityRules || []).filter((_, i) => i !== idx);
+    updateDeckCastPriorityRules(deck.id, deck.castPriorityRules);
+    refresh();
+  },
+
+  /** Changing match type re-renders the target widget, so refresh is needed. */
+  setMatch(idx, match) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.castPriorityRules?.[idx]) return;
+    deck.castPriorityRules[idx].match = match;
+    updateDeckCastPriorityRules(deck.id, deck.castPriorityRules);
+    refresh();
+  },
+
+  /** Direct field mutation — no refresh needed (inputs are live). */
+  setField(idx, key, val) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.castPriorityRules?.[idx]) return;
+    deck.castPriorityRules[idx][key] = val;
+  },
+
+  /** Pick a named card from the single-select dropdown; refresh closes the panel. */
+  pickCard(idx, name) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.castPriorityRules?.[idx]) return;
+    deck.castPriorityRules[idx].cardName = name;
+    updateDeckCastPriorityRules(deck.id, deck.castPriorityRules);
+    window.__preview?.hide();
+    refresh();
+  },
+
+  dragStart(idx) {
+    this._dragSrc = idx;
+  },
+
+  drop(targetIdx) {
+    if (this._dragSrc === null || this._dragSrc === targetIdx) {
+      this._dragSrc = null;
+      return;
+    }
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.castPriorityRules) return;
+    const rules = [...deck.castPriorityRules];
+    const [moved] = rules.splice(this._dragSrc, 1);
+    rules.splice(targetIdx, 0, moved);
+    updateDeckCastPriorityRules(deck.id, rules);
+    this._dragSrc = null;
+    refresh();
+  },
+};
+
+// ─── Tutor Priority Rule Actions ──────────────────────────────────────────────
+
+window.__tpr = {
+  _dragSrc: null,
+
+  add() {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    if (!Array.isArray(deck.tutorPriorityRules)) deck.tutorPriorityRules = [];
+    deck.tutorPriorityRules.push({
+      id: generateId(), target: 'named',
+      cardName: '', cardType: 'Land', cardSubtype: '', effectCategory: 'draw',
+      requireNotInHand: false,
+    });
+    updateDeckTutorPriorityRules(deck.id, deck.tutorPriorityRules);
+    refresh();
+  },
+
+  remove(idx) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    deck.tutorPriorityRules = (deck.tutorPriorityRules || []).filter((_, i) => i !== idx);
+    updateDeckTutorPriorityRules(deck.id, deck.tutorPriorityRules);
+    refresh();
+  },
+
+  /** Changing target type re-renders the target widget. */
+  setTarget(idx, target) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.tutorPriorityRules?.[idx]) return;
+    deck.tutorPriorityRules[idx].target = target;
+    updateDeckTutorPriorityRules(deck.id, deck.tutorPriorityRules);
+    refresh();
+  },
+
+  /** Direct field mutation — no refresh needed for live inputs. */
+  setField(idx, key, val) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.tutorPriorityRules?.[idx]) return;
+    deck.tutorPriorityRules[idx][key] = val;
+  },
+
+  /** Pick a named card from the single-select dropdown. */
+  pickCard(idx, name) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.tutorPriorityRules?.[idx]) return;
+    deck.tutorPriorityRules[idx].cardName = name;
+    updateDeckTutorPriorityRules(deck.id, deck.tutorPriorityRules);
+    window.__preview?.hide();
+    refresh();
+  },
+
+  dragStart(idx) {
+    this._dragSrc = idx;
+  },
+
+  drop(targetIdx) {
+    if (this._dragSrc === null || this._dragSrc === targetIdx) {
+      this._dragSrc = null;
+      return;
+    }
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.tutorPriorityRules) return;
+    const rules = [...deck.tutorPriorityRules];
+    const [moved] = rules.splice(this._dragSrc, 1);
+    rules.splice(targetIdx, 0, moved);
+    updateDeckTutorPriorityRules(deck.id, rules);
+    this._dragSrc = null;
+    refresh();
+  },
+};
+
 // ─── X Spell Value Actions ────────────────────────────────────────────────────
 
 window.__xcosts = {
@@ -533,19 +679,21 @@ window.__eff = {
     if (alreadyOverridden) return;
 
     const typeInfo = EFFECT_TYPES[subtype];
+    // Copy all typed field values from the auto tag so the override starts accurate.
+    const autoFieldValues = {};
+    for (const f of (typeInfo?.fields ?? [])) {
+      if (autoTag[f.key] !== undefined) autoFieldValues[f.key] = autoTag[f.key];
+    }
     card.effectTags.push({
       category:      autoTag.category,
       subtype:       autoTag.subtype,
       timing:        autoTag.timing,
       condition:     autoTag.condition ?? null,
-      expectedValue: null,
       tier:          autoTag.tier,
       source:        'user',
-      ...(typeInfo?.defaultValues() ?? {}),
-      // Inherit the auto-detected value so the override starts accurate
-      value:         autoTag.value,
-      // Inherit trigger filter so override reflects the detected spell/death filter
       triggerFilter: autoTag.triggerFilter ?? null,
+      ...(typeInfo?.defaultValues() ?? {}),
+      ...autoFieldValues,
     });
     refresh();
   },
@@ -576,7 +724,6 @@ window.__eff = {
       subtype:       chosenType.id,
       timing:        chosenTiming,
       condition:     null,
-      expectedValue: null,
       tier:          chosenType.defaultTier,
       source:        'user',
       ...chosenType.defaultValues(),

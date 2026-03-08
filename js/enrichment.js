@@ -11,7 +11,7 @@
  * Cards already cached are not re-fetched even across different deck imports.
  */
 
-import { detectEffectTags } from './effects.js';
+import { detectEffectTags, detectEtbTapped } from './effects.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -120,30 +120,36 @@ function sleep(ms) {
 
 // ─── Card Enrichment ──────────────────────────────────────────────────────────
 
+const KNOWN_SUPERTYPES = ['Basic', 'Legendary', 'Snow', 'World', 'Ongoing'];
+
 /**
- * Derive the primary card type from a Scryfall type_line string.
- * Used for single-faced cards only. For MDFCs use typeLineToTypes() per face.
- *
+ * Extract supertypes from a type_line string (text before "—").
+ * e.g. "Basic Land — Forest" → ['Basic']
  * @param {string} typeLine
- * @returns {string}
+ * @returns {string[]}
  */
-function typeLineToType(typeLine) {
-  if (!typeLine) return 'Other';
-  const main = typeLine.split('—')[0].toLowerCase();
-  if (main.includes('land'))         return 'Land';
-  if (main.includes('creature'))     return 'Creature';
-  if (main.includes('instant'))      return 'Instant';
-  if (main.includes('sorcery'))      return 'Sorcery';
-  if (main.includes('artifact'))     return 'Artifact';
-  if (main.includes('enchantment'))  return 'Enchantment';
-  if (main.includes('planeswalker')) return 'Planeswalker';
-  if (main.includes('battle'))       return 'Battle';
-  return 'Other';
+function typeLineToSupertypes(typeLine) {
+  if (!typeLine) return [];
+  const mainPart = typeLine.split('—')[0];
+  return KNOWN_SUPERTYPES.filter(st => mainPart.includes(st));
+}
+
+/**
+ * Extract subtypes from a type_line string (text after "—").
+ * e.g. "Creature — Human Wizard" → ['Human', 'Wizard']
+ * @param {string} typeLine
+ * @returns {string[]}
+ */
+function typeLineToSubtypes(typeLine) {
+  if (!typeLine) return [];
+  const dashIdx = typeLine.indexOf('—');
+  if (dashIdx < 0) return [];
+  return typeLine.slice(dashIdx + 1).trim().split(/\s+/).filter(Boolean);
 }
 
 /**
  * Extract all recognized card types from a single-face type_line string.
- * Unlike typeLineToType(), returns every matching type rather than just the primary.
+ * Returns every matching main type rather than just the primary.
  * e.g. "Legendary Creature — Human Wizard" → ['Creature']
  *      "Artifact Creature — Golem"          → ['Creature', 'Artifact']
  *      "Basic Land — Forest"                → ['Land']
@@ -186,10 +192,13 @@ function extractEnrichmentFields(scryfallCard) {
     const faces = scryfallCard.card_faces.map(face => {
       const faceOracleText = face.oracle_text || null;
       const faceKeywords = face.keywords || [];
-      const faceTypes = typeLineToTypes(face.type_line || '');
+      const faceTypeLine = face.type_line || '';
+      const faceTypes = typeLineToTypes(faceTypeLine);
       return {
         name: face.name || '',
         types: faceTypes,
+        supertypes: typeLineToSupertypes(faceTypeLine),
+        subtypes: typeLineToSubtypes(faceTypeLine),
         oracleText: faceOracleText,
         cmc: face.cmc ?? null,
         manaCost: face.mana_cost || null,
@@ -209,6 +218,9 @@ function extractEnrichmentFields(scryfallCard) {
     // Front face drives card-level fields used for casting as a spell
     const frontFace = faces[0];
 
+    // For MDFCs, check the land face for ETB-tapped status
+    const landFace = faces.find(f => f.types?.includes('Land'));
+
     return {
       oracleText: frontFace.oracleText,
       cmc: frontFace.cmc ?? scryfallCard.cmc ?? null,
@@ -223,6 +235,7 @@ function extractEnrichmentFields(scryfallCard) {
       types,
       isMDFC: true,
       faces,
+      etbTapped: landFace ? detectEtbTapped(landFace.oracleText) : false,
       power: faces[0].power ?? null,
       toughness: faces[0].toughness ?? null,
       imageUrl: scryfallCard.image_uris?.normal
@@ -241,9 +254,12 @@ function extractEnrichmentFields(scryfallCard) {
     keywords = scryfallCard.card_faces[0].keywords || keywords;
   }
 
-  // Use typeLineToTypes() so multi-type cards (e.g. "Enchantment Land", "Artifact Creature")
-  // carry all their types rather than only the primary one.
-  const types = scryfallCard.type_line ? typeLineToTypes(scryfallCard.type_line) : null;
+  // Prefer Scryfall's structured type arrays; fall back to parsing type_line.
+  // Scryfall's types[] values match our CARD_TYPES (Land, Creature, Artifact, etc.).
+  const typeLine = scryfallCard.type_line || '';
+  const types = scryfallCard.types?.length ? scryfallCard.types : typeLineToTypes(typeLine);
+  const supertypes = scryfallCard.supertypes ?? typeLineToSupertypes(typeLine);
+  const subtypes = scryfallCard.subtypes ?? typeLineToSubtypes(typeLine);
   const effectTags = detectEffectTags(oracleText, keywords, types ?? []);
 
   return {
@@ -256,8 +272,11 @@ function extractEnrichmentFields(scryfallCard) {
     enriched: true,
     effectTags,
     types,
+    supertypes,
+    subtypes,
     isMDFC: false,
     faces: null,
+    etbTapped: detectEtbTapped(oracleText),
     power: scryfallCard.power ?? scryfallCard.card_faces?.[0]?.power ?? null,
     toughness: scryfallCard.toughness ?? scryfallCard.card_faces?.[0]?.toughness ?? null,
     imageUrl: scryfallCard.image_uris?.normal
@@ -345,6 +364,8 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
               enriched: false,
               effectTags: [],
               types: null,
+              supertypes: [],
+              subtypes: [],
               isMDFC: false,
               faces: null,
               power: null,
@@ -366,6 +387,8 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
               enriched: false,
               effectTags: [],
               types: null,
+              supertypes: [],
+              subtypes: [],
               isMDFC: false,
               faces: null,
               power: null,

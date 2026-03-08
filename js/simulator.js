@@ -5,7 +5,7 @@
  *   1. Opening-hand only (always available) — draws 7, counts types
  *   2. Turn-by-turn (requires Scryfall enrichment) — full game loop to turn N
  *
- * The turn loop runs: Untap → Upkeep → Draw → Mana → Land → Cast → Record.
+ * The turn loop runs: Untap → Upkeep → Draw → Land → Main Phase (tap mana → tap-draw → cast, repeat) → End Step → Record.
  * 1,000 games × 10 turns must complete in < 1s.
  */
 
@@ -193,6 +193,7 @@ function initGameState(flatDeck, discardPriorities = [], xCosts = {}) {
     deckedOut: false,
     discardPriorities,
     xCosts,
+    cardsDrawnThisTurn: 0,
   };
 }
 
@@ -206,23 +207,56 @@ function newTurnRecord(turn) {
 }
 
 /**
- * Draw one card into hand. Sets gs.deckedOut and returns false if library is empty.
- * All card draws must go through here so the loss condition is handled consistently.
+ * Draw `count` cards into hand, applying any active draw_replacement multipliers
+ * from battlefield permanents (e.g. Alhammarret's Archive).
+ *
+ * Multiple replacements multiply together (MTG rule 614.5: each applies once).
+ * The `exceptFirst` flag skips the multiplier when this is the first draw requested
+ * this turn (cardsDrawnThisTurn === 0 at call time).
  *
  * @param {GameState} gs
- * @param {string|null} effectLabel  - if provided, pushed to effectsFired (e.g. "The One Ring:tap:draw")
- * @returns {boolean} true if a card was drawn, false if the library was empty (deckedOut set)
+ * @param {number}    [count=1]
+ * @param {string|null} [effectLabel]
+ * @returns {boolean} false if library ran out (gs.deckedOut set)
  */
-function drawCard(gs, effectLabel = null) {
-  if (gs.library.length === 0) {
-    gs.deckedOut = true;
-    return false;
+function drawCards(gs, count = 1, effectLabel = null) {
+  let multiplier = 1;
+  for (const { card } of gs.battlefield) {
+    for (const tag of (card.effectTags ?? [])) {
+      if (tag.tier !== 'simulatable') continue;
+      if (tag.subtype !== 'draw_replacement') continue;
+      if (tag.exceptFirst && gs.cardsDrawnThisTurn === 0) continue;
+      multiplier *= (tag.multiplier ?? 2);
+    }
   }
-  const drawn = gs.library.shift();
-  gs.hand.push(drawn);
-  gs.currentTurnRecord.cardsDrawn.push(drawn);
-  if (effectLabel) gs.currentTurnRecord.effectsFired.push(effectLabel);
+
+  const adjustedCount = count * multiplier;
+
+  for (let i = 0; i < adjustedCount; i++) {
+    if (gs.library.length === 0) { gs.deckedOut = true; return false; }
+    const drawn = gs.library.shift();
+    gs.hand.push(drawn);
+    gs.currentTurnRecord.cardsDrawn.push(drawn);
+    if (effectLabel) gs.currentTurnRecord.effectsFired.push(effectLabel);
+  }
+
+  gs.cardsDrawnThisTurn += count;  // original requested count, not amplified
   return true;
+}
+
+/**
+ * Convert a fractional expected count to an integer via probabilistic rounding.
+ * 1.7 → always draws 1, 70% chance of drawing 2 (expected = 1.7).
+ * Integers pass through unchanged. Used so users can set conditional expected
+ * draws per trigger (e.g. Rhystic Study = 0.3 expected draws per opponent cast).
+ * @param {number} value
+ * @returns {number}
+ */
+function fractionalToCount(value) {
+  if (value <= 0) return 0;
+  const whole = Math.floor(value);
+  const remainder = value - whole;
+  return whole + (remainder > 0 && Math.random() < remainder ? 1 : 0);
 }
 
 // ─── Discard Selection ────────────────────────────────────────────────────────
@@ -317,18 +351,10 @@ function resolveDrawEffects(gs, timing, subset = null, castingCard = null) {
         if (hasUserOverride) continue;
       }
 
-      // Determine draw count: EV override > X-cost lookup > detected value
-      let drawCount;
-      if (tag.source === 'user' && tag.expectedValue != null) {
-        drawCount = Math.floor(tag.expectedValue);
-      } else if (tag.condition === 'draw X') {
-        drawCount = gs.xCosts?.[card.name] ?? 0;
-      } else {
-        drawCount = tag.value ?? 1;
-      }
-      for (let d = 0; d < drawCount; d++) {
-        if (!drawCard(gs, `${card.name}:${timing}:draw`)) return;
-      }
+      const drawCount = tag.condition === 'draw X'
+        ? (gs.xCosts?.[card.name] ?? 0)
+        : fractionalToCount(tag.value ?? 1);
+      if (!drawCards(gs, drawCount, `${card.name}:${timing}:draw`)) return;
     }
   }
 }
@@ -369,16 +395,11 @@ function resolveLootEffects(gs, timing, subset = null, castingCard = null) {
         if (hasUserOverride) continue;
       }
 
-      const drawCount = (tag.source === 'user' && tag.expectedValue != null)
-        ? Math.floor(tag.expectedValue)
-        : (tag.value ?? 1);
-      const discardCount = tag.discardCount ?? 1;
+      const drawCount    = fractionalToCount(tag.value ?? 1);
+      const discardCount = fractionalToCount(tag.discardCount ?? 1);
 
       // Draw first
-      for (let d = 0; d < drawCount; d++) {
-        if (!drawCard(gs, `${card.name}:${timing}:loot:draw`)) return;
-      }
-      if (gs.deckedOut) return;
+      if (!drawCards(gs, drawCount, `${card.name}:${timing}:loot:draw`)) return;
 
       // Then discard using priority selection
       for (let d = 0; d < discardCount && gs.hand.length > 0; d++) {
@@ -389,6 +410,176 @@ function resolveLootEffects(gs, timing, subset = null, castingCard = null) {
         gs.graveyard.push(toDiscard);
         gs.currentTurnRecord.effectsFired.push(`${card.name}:${timing}:loot:discard`);
       }
+    }
+  }
+}
+
+// ─── Tutor Resolution ─────────────────────────────────────────────────────────
+
+/**
+ * Check if a library card satisfies a FetchConstraint.
+ * @param {Card} card
+ * @param {import('./types.js').FetchConstraint|null} constraint
+ * @returns {boolean}
+ */
+function matchesFetchConstraint(card, constraint) {
+  if (!constraint) return false;
+  if (constraint.any) return true;
+
+  const types        = card.types      ?? [];
+  const supertypes   = card.supertypes ?? [];
+  const cardSubtypes = card.subtypes   ?? [];
+
+  if (constraint.nonland && types.some(t => t.toLowerCase() === 'land')) return false;
+  if (constraint.supertype && !supertypes.includes(constraint.supertype)) return false;
+
+  if (constraint.type) {
+    if (constraint.type === 'InstantOrSorcery') {
+      if (!types.includes('Instant') && !types.includes('Sorcery')) return false;
+    } else if (constraint.type === 'ArtifactOrEnchantment') {
+      if (!types.includes('Artifact') && !types.includes('Enchantment')) return false;
+    } else if (constraint.type === 'Permanent') {
+      const permTypes = ['Creature', 'Artifact', 'Enchantment', 'Planeswalker', 'Land', 'Battle'];
+      if (!types.some(t => permTypes.includes(t))) return false;
+    } else {
+      if (!types.includes(constraint.type)) return false;
+    }
+  }
+
+  // subtypes: OR semantics — card must match at least one.
+  // Also handles legacy saves where the field was named 'subtype' (string).
+  const constraintSubtypes = constraint.subtypes
+    ?? (constraint.subtype ? [constraint.subtype] : null);
+  if (constraintSubtypes && !constraintSubtypes.some(sub => cardSubtypes.includes(sub))) return false;
+
+  return true;
+}
+
+/**
+ * Check if a library card matches the target criteria of a TutorPriorityRule.
+ * @param {Card} card
+ * @param {import('./types.js').TutorPriorityRule} rule
+ * @returns {boolean}
+ */
+function matchesTutorPriorityTarget(card, rule) {
+  switch (rule.target) {
+    case 'named':
+      return card.name === rule.cardName;
+    case 'type':
+      return (card.types ?? []).includes(rule.cardType);
+    case 'subtype':
+      return (card.subtypes ?? []).includes(rule.cardSubtype);
+    case 'effect_category':
+      return (card.effectTags ?? []).some(t => t.category === rule.effectCategory);
+    default:
+      return false;
+  }
+}
+
+/**
+ * Find the best library card to fetch for a given tutor tag + priority rules.
+ * Rules are evaluated top-to-bottom; first rule with a matching card in the
+ * library (that also passes the tutor's FetchConstraint) wins.
+ * Returns null if no rule has a valid target.
+ *
+ * @param {import('./types.js').EffectTag} tutorTag
+ * @param {import('./types.js').TutorPriorityRule[]} rules
+ * @param {GameState} gs
+ * @returns {Card|null}
+ */
+function findTutorTarget(tutorTag, rules, gs) {
+  const validLibrary = gs.library.filter(c => matchesFetchConstraint(c, tutorTag.fetchType));
+  if (validLibrary.length === 0) return null;
+
+  for (const rule of rules) {
+    // Named card rules always skip if the card is already in hand.
+    // Other rule types respect the explicit requireNotInHand flag.
+    const skipIfInHand = rule.target === 'named' || rule.requireNotInHand;
+    if (skipIfInHand) {
+      const alreadyInHand = gs.hand.some(c => matchesTutorPriorityTarget(c, rule));
+      if (alreadyInHand) continue;
+    }
+    const target = validLibrary.find(c => matchesTutorPriorityTarget(c, rule));
+    if (target) return target;
+  }
+
+  return null;
+}
+
+/**
+ * Check if a tutor card can be cast (has a valid target in the library).
+ * Tutors with no matching rules or no valid target are excluded from the castable set.
+ *
+ * @param {Card} tutorCard
+ * @param {import('./types.js').TutorPriorityRule[]} rules
+ * @param {GameState} gs
+ * @returns {boolean}
+ */
+function canResolveTutor(tutorCard, rules, gs) {
+  const tutorTag = tutorCard.effectTags?.find(t => t.category === 'tutor' && t.tier === 'simulatable');
+  if (!tutorTag) return false;
+  return findTutorTarget(tutorTag, rules, gs) !== null;
+}
+
+/**
+ * Execute a tutor: remove the target from the library (shuffle rest), then
+ * put it into hand, onto the battlefield (with ETB), or on top of library.
+ *
+ * @param {Card} tutorCard
+ * @param {import('./types.js').EffectTag} tutorTag
+ * @param {import('./types.js').TutorPriorityRule[]} rules
+ * @param {GameState} gs
+ */
+function resolveTutor(tutorCard, tutorTag, rules, gs) {
+  const target = findTutorTarget(tutorTag, rules, gs);
+  if (!target) return;
+
+  const idx = gs.library.indexOf(target);
+  if (idx < 0) return;
+  gs.library.splice(idx, 1);
+  shuffle(gs.library); // standard MTG: shuffle after searching
+
+  if (tutorTag.putWhere === 'battlefield') {
+    const bfEntry = { card: target, tapped: false, turnEntered: gs.turn, counters: {} };
+    gs.battlefield.push(bfEntry);
+    resolveDrawEffects(gs, 'etb', [bfEntry]);
+    resolveLootEffects(gs, 'etb', [bfEntry]);
+  } else if (tutorTag.putWhere === 'top_of_library') {
+    gs.library.unshift(target);
+  } else {
+    gs.hand.push(target);
+  }
+
+  gs.currentTurnRecord.effectsFired.push(`${tutorCard.name}:tutor:${target.name}`);
+}
+
+/**
+ * Resolve all simulatable tutor effects with a given timing from a card subset.
+ *
+ * @param {GameState} gs
+ * @param {string} timing
+ * @param {Array<{card: Card}>} [subset]
+ * @param {import('./types.js').TutorPriorityRule[]} tutorPriorityRules
+ */
+function resolveTutorEffects(gs, timing, subset, tutorPriorityRules) {
+  const permanents = subset ?? gs.battlefield;
+  for (const { card } of permanents) {
+    if (!card.effectTags) continue;
+    for (const tag of card.effectTags) {
+      if (tag.tier !== 'simulatable') continue;
+      if (tag.category !== 'tutor') continue;
+      const timingMatch = tag.timing === timing ||
+        (timing === 'on_resolution' && tag.timing === 'passive');
+      if (!timingMatch) continue;
+
+      if (tag.source === 'auto') {
+        const hasUserOverride = card.effectTags.some(
+          t => t.source === 'user' && t.category === 'tutor' && t.timing === tag.timing
+        );
+        if (hasUserOverride) continue;
+      }
+
+      resolveTutor(card, tag, tutorPriorityRules, gs);
     }
   }
 }
@@ -427,7 +618,7 @@ function resolveTapDraws(gs) {
       if (tag.timing !== 'tap') continue;
 
       // Skip auto tag if user has overridden the same (subtype, timing) pair
-      if (tag.category !== 'draw') continue; // mana_rock and other ramp tags are handled in Mana phase
+      if (tag.category !== 'draw') continue; // mana_rock and other ramp tags are handled by tapAvailableMana
 
       if (tag.source === 'auto') {
         const hasUserOverride = bf.card.effectTags.some(
@@ -441,15 +632,11 @@ function resolveTapDraws(gs) {
         if (!bf.counters) bf.counters = {};
         bf.counters[counterKey] = (bf.counters[counterKey] || 0) + 1;
         const drawCount = bf.counters[counterKey];
-        for (let d = 0; d < drawCount; d++) {
-          if (!drawCard(gs, `${bf.card.name}:tap:draw`)) return tappedAny;
-        }
+        if (!drawCards(gs, drawCount, `${bf.card.name}:tap:draw`)) return tappedAny;
       } else if (tag.subtype === 'loot') {
         const drawCount = tag.value ?? 1;
         const discardCount = tag.discardCount ?? 1;
-        for (let d = 0; d < drawCount; d++) {
-          if (!drawCard(gs, `${bf.card.name}:tap:loot:draw`)) return tappedAny;
-        }
+        if (!drawCards(gs, drawCount, `${bf.card.name}:tap:loot:draw`)) return tappedAny;
         for (let d = 0; d < discardCount && gs.hand.length > 0; d++) {
           const toDiscard = selectCardToDiscard(gs.hand, gs.discardPriorities);
           if (!toDiscard) break;
@@ -459,13 +646,8 @@ function resolveTapDraws(gs) {
           gs.currentTurnRecord.effectsFired.push(`${bf.card.name}:tap:loot:discard`);
         }
       } else {
-        // draw_n: user tags with expectedValue drive simulation for conditional effects
-        const drawCount = (tag.source === 'user' && tag.expectedValue != null)
-          ? Math.floor(tag.expectedValue)
-          : (tag.value ?? 1);
-        for (let d = 0; d < drawCount; d++) {
-          if (!drawCard(gs, `${bf.card.name}:tap:draw`)) return tappedAny;
-        }
+        // draw_n: fractional value = expected draws per trigger (e.g. 0.7 = conditional)
+        if (!drawCards(gs, fractionalToCount(tag.value ?? 1), `${bf.card.name}:tap:draw`)) return tappedAny;
       }
       shouldTap = true;
     }
@@ -539,14 +721,56 @@ function effectiveCost(card, gs) {
 }
 
 /**
+ * Check whether a card matches a CastPriorityRule.
+ * For MDFCs, type/subtype checks use the spell face.
+ *
+ * @param {Card} card
+ * @param {import('./types.js').CastPriorityRule} rule
+ * @returns {boolean}
+ */
+function matchesCastPriorityRule(card, rule) {
+  const spellFace = getMDFCSpellFace(card);
+  switch (rule.match) {
+    case 'named':
+      return card.name === rule.cardName;
+    case 'type': {
+      const types = spellFace?.types ?? card.types ?? [];
+      return types.includes(rule.cardType);
+    }
+    case 'subtype': {
+      const subtypes = spellFace?.subtypes ?? card.subtypes ?? [];
+      return subtypes.includes(rule.cardSubtype);
+    }
+    case 'effect_category':
+      return (card.effectTags || []).some(t => t.category === rule.effectCategory);
+    default:
+      return false;
+  }
+}
+
+/**
  * Score a hand card for greedy casting priority.
  * Lower score = higher priority (cast first).
+ *
+ * Cast priority rules are checked first (Phase 1: match only, no conditions).
+ * Rule at index i of N total rules → score = (i - N) * 10000, which always
+ * beats any category-based score. Unmatched cards fall through to the existing
+ * category + CMC tiebreak.
  *
  * @param {Card} card
  * @param {StrategyConfig} strategy
  * @returns {number} sort key (lower = higher priority)
  */
 function castScore(card, strategy) {
+  // Check cast priority rules first — first matching rule wins.
+  const rules = strategy.castPriorityRules ?? [];
+  const N = rules.length;
+  for (let i = 0; i < N; i++) {
+    if (matchesCastPriorityRule(card, rules[i])) {
+      return (i - N) * 10000;
+    }
+  }
+
   // Determine which category this card falls under for priority ordering.
   // Cards with draw effectTags rank as 'draw', ramp as 'ramp', etc.
   // Otherwise fall back to primary type → priority list position.
@@ -577,6 +801,53 @@ function castScore(card, strategy) {
   return categoryIndex * 1000 + cmcTiebreak;
 }
 
+// ─── Mana Tapping ─────────────────────────────────────────────────────────────
+
+/**
+ * Tap all currently untapped mana sources on the battlefield and add their
+ * mana to gs.manaAvailable. Called at the top of each main-phase loop
+ * iteration so that permanents entering mid-turn (mana rocks, ETB-untapped
+ * lands) contribute mana in the same turn.
+ *
+ * Land mana value: checks for a simulatable mana_rock tag first (handles
+ * lands like Ancient Tomb that tap for 2); falls back to 1.
+ * Non-land mana rocks: uses the mana_rock tag value directly.
+ *
+ * Summoning sickness applies to creatures only.
+ *
+ * @param {GameState} gs
+ * @param {number} turn  - current turn number (for summoning sickness check)
+ */
+function tapAvailableMana(gs, turn) {
+  for (const bf of gs.battlefield) {
+    if (bf.tapped) continue;
+    const isCreature = bf.card.types?.some(t => t.toLowerCase() === 'creature');
+    if (isCreature && bf.turnEntered === turn) continue; // summoning sickness
+    const card = bf.card;
+    if (isLand(card)) {
+      // Lands that produce more than 1 mana (e.g. Ancient Tomb) carry a mana_rock tag.
+      const landRockTag = card.effectTags?.find(
+        t => t.tier === 'simulatable' && t.subtype === 'mana_rock' && t.timing === 'tap'
+      );
+      bf.tapped = true;
+      const manaAdded = landRockTag?.value ?? 1;
+      gs.manaAvailable += manaAdded;
+      gs.currentTurnRecord.manaAvailable += manaAdded;
+    } else {
+      const rockTag = card.effectTags?.find(
+        t => t.tier === 'simulatable' && t.category === 'ramp' && t.subtype === 'mana_rock' && t.timing === 'tap'
+      );
+      if (rockTag) {
+        bf.tapped = true;
+        const manaAdded = rockTag.value ?? 1;
+        gs.manaAvailable += manaAdded;
+        gs.currentTurnRecord.manaAvailable += manaAdded;
+        gs.currentTurnRecord.manaFromRocks += manaAdded;
+      }
+    }
+  }
+}
+
 // ─── Turn Loop ────────────────────────────────────────────────────────────────
 
 /**
@@ -598,6 +869,7 @@ function simulateGame(flatDeck, strategy) {
     // ── Untap ──────────────────────────────────────────────────────────────
     gs.landPlayedThisTurn = false;
     gs.landDropsAvailable = 1;
+    gs.cardsDrawnThisTurn = 0;
     for (const bf of gs.battlefield) bf.tapped = false;
 
     // ── Upkeep ─────────────────────────────────────────────────────────────
@@ -618,41 +890,16 @@ function simulateGame(flatDeck, strategy) {
     resolveDrawEffects(gs, 'draw_step');
     resolveLootEffects(gs, 'draw_step');
     if (gs.deckedOut) break;
-    if (!drawCard(gs)) break;
-
-    // ── Mana ───────────────────────────────────────────────────────────────
-    // Count mana from all untapped lands, then tap simulatable mana rocks.
-    // Lands are not individually marked tapped — they're tracked as a pool.
-    // Mana rocks are marked tapped so they don't also fire tap-draw abilities.
-    const landManaThisTurn = gs.battlefield.filter(bf => isLand(bf.card)).length;
-    let totalMana = landManaThisTurn;
-    let rockManaThisTurn = 0;
-    for (const bf of gs.battlefield) {
-      if (bf.tapped) continue;
-      const isCreatureCard = bf.card.types?.some(t => t.toLowerCase() === 'creature');
-      if (isCreatureCard && bf.turnEntered === turn) continue; // summoning sickness
-      const rockTag = bf.card.effectTags?.find(
-        t => t.tier === 'simulatable' && t.category === 'ramp' && t.subtype === 'mana_rock' && t.timing === 'tap'
-      );
-      if (rockTag) {
-        bf.tapped = true;
-        // Lands that also have a mana_rock tag (e.g. Command Tower, Exotic Orchard)
-        // are already counted in the land total above — don't add mana twice.
-        if (!isLand(bf.card)) {
-          const manaAdded = rockTag.value ?? 1;
-          totalMana += manaAdded;
-          rockManaThisTurn += manaAdded;
-        }
-      }
-    }
-    gs.manaAvailable = totalMana;
-    gs.currentTurnRecord.manaFromRocks = rockManaThisTurn;
+    if (!drawCards(gs)) break;
 
     // ── Land ───────────────────────────────────────────────────────────────
     // Prefer pure lands. If none, choose the MDFC land-back whose spell face
     // has the worst cast score (highest score number = lowest priority). This
     // keeps higher-priority MDFC spell faces in hand when multiple land-backs
     // are available — e.g. keep Creature CMC 2, sacrifice Sorcery CMC 4.
+    //
+    // ETB-tapped lands enter with tapped:true so tapAvailableMana skips them
+    // this turn; they untap normally at the start of the next turn.
     let landIdx = gs.hand.findIndex(c => isPureLand(c));
     if (landIdx < 0) {
       let bestMdfcIdx = -1;
@@ -666,26 +913,30 @@ function simulateGame(flatDeck, strategy) {
     }
     if (landIdx >= 0 && !gs.landPlayedThisTurn) {
       const land = gs.hand.splice(landIdx, 1)[0];
-      gs.battlefield.push({ card: land, tapped: false, turnEntered: turn, counters: {} });
+      gs.battlefield.push({ card: land, tapped: land.etbTapped ?? false, turnEntered: turn, counters: {} });
       gs.landPlayedThisTurn = true;
-      gs.manaAvailable += 1;
       gs.currentTurnRecord.landsPlayed.push(land);
       // Fire land ETB triggers (e.g. Tatyova, Benthic Druid)
       resolveDrawEffects(gs, 'land_etb');
       resolveLootEffects(gs, 'land_etb');
     }
 
-    // Record mana AFTER land play so the land drop this turn is included
-    gs.currentTurnRecord.manaAvailable = gs.manaAvailable;
-
     // ── Main Phase ─────────────────────────────────────────────────────────
-    // Interleaved tap-draw and casting: activate tap abilities, cast spells,
-    // then repeat in case new permanents entered (with tap abilities) or new
-    // cards were drawn (enabling additional casts). Models MTG's first main phase.
-    // Non-creature permanents can tap on the turn they enter (no summoning sickness).
+    // Each iteration: tap available mana sources → tap-draw → cast spells.
+    // Restarting the loop handles permanents that entered this turn (mana rocks,
+    // lands) which can be tapped for mana or abilities in the same turn.
+    // ETB-tapped lands are already marked tapped above; they contribute 0 mana
+    // until they untap next turn.
     let mainPhaseProgress = true;
     while (mainPhaseProgress) {
       mainPhaseProgress = false;
+
+      // ── Tap Mana ─────────────────────────────────────────────────────────
+      // Tap all untapped lands and mana rocks. Lands use their mana_rock tag
+      // value if present (e.g. Ancient Tomb → 2), otherwise 1.
+      // Running this each iteration lets newly cast mana rocks contribute mana
+      // on the same turn they enter.
+      tapAvailableMana(gs, turn);
 
       // ── Tap Draw ─────────────────────────────────────────────────────────
       // Activate all available tap-draw abilities. Respects summoning sickness:
@@ -710,6 +961,9 @@ function simulateGame(flatDeck, strategy) {
               t => t.subtype === 'loot' && t.isAdditionalCost && t.tier === 'simulatable'
             );
             if (addlCost && gs.hand.length - 1 < (addlCost.discardCount ?? 1)) return false;
+            // Tutors: only castable when a valid target exists in the library
+            const hasTutor = c.effectTags?.some(t => t.category === 'tutor' && t.tier === 'simulatable');
+            if (hasTutor && !canResolveTutor(c, strategy.tutorPriorityRules, gs)) return false;
             return true;
           })
           .sort((a, b) => castScore(a, strategy) - castScore(b, strategy));
@@ -749,6 +1003,7 @@ function simulateGame(flatDeck, strategy) {
           // Fire ETB effects — only newly entered card
           resolveDrawEffects(gs, 'etb', [bfEntry]);
           resolveLootEffects(gs, 'etb', [bfEntry]);
+          resolveTutorEffects(gs, 'etb', [bfEntry], strategy.tutorPriorityRules);
           // Fire creature_etb watchers (e.g. Soul of the Harvest, Guardian Project).
           // Exclude the entering creature itself from the watcher set — handles "another
           // creature" semantics without needing to parse "another" from oracle text.
@@ -759,9 +1014,10 @@ function simulateGame(flatDeck, strategy) {
             resolveLootEffects(gs, 'creature_etb', watcherSubset, toCast);
           }
         } else {
-          // Resolve the spell's own draw/loot effects on resolution
+          // Resolve the spell's own draw/loot/tutor effects on resolution
           resolveDrawEffects(gs, 'on_resolution', [{ card: toCast }]);
           resolveLootEffects(gs, 'on_resolution', [{ card: toCast }]);
+          resolveTutorEffects(gs, 'on_resolution', [{ card: toCast }], strategy.tutorPriorityRules);
           gs.graveyard.push(toCast);
         }
 
@@ -989,8 +1245,10 @@ export function runSimulation(deck, gameCount = 1000, goodHandDefs = []) {
   const strategy = {
     ...DEFAULT_STRATEGY_CONFIG,
     ...(deck.strategyConfig || {}),
-    discardPriorities: deck.discardPriorities || [],
-    xCosts: deck.xCosts || {},
+    discardPriorities:  deck.discardPriorities  || [],
+    xCosts:             deck.xCosts             || {},
+    castPriorityRules:  deck.castPriorityRules  || [],
+    tutorPriorityRules: deck.tutorPriorityRules || [],
   };
 
   let hands = [];

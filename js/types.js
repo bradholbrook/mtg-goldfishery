@@ -26,6 +26,8 @@
  * @property {string|null}  [backImageUrl] - Scryfall 'normal' image URL for the back face (MDFCs only)
  * @property {string|null}  [power]        - Creature power (string e.g. "3", "*")
  * @property {string|null}  [toughness]    - Creature toughness
+ * @property {string[]}     [supertypes]   - Scryfall supertypes: e.g. ['Basic'] | ['Legendary'] | []
+ * @property {string[]}     [subtypes]     - Scryfall subtypes: e.g. ['Forest'] | ['Human','Wizard'] | []
  */
 
 /**
@@ -46,19 +48,44 @@
  */
 
 /**
+ * Describes what a tutor is allowed to search for. All fields are ANDed.
+ * @typedef {Object} FetchConstraint
+ * @property {boolean}     any        - true = any card in the library
+ * @property {boolean}     nonland    - true = any nonland card
+ * @property {string|null}   supertype  - e.g. 'Basic' | 'Legendary' | null
+ * @property {string|null}   type       - e.g. 'Creature' | 'Land' | 'InstantOrSorcery' | 'ArtifactOrEnchantment' | 'Permanent' | null
+ * @property {string[]|null} subtypes   - land subtypes or creature subtypes (OR semantics); e.g. ['Plains','Island'] or ['Wizard']
+ */
+
+/**
+ * A rule that tells the simulator what to fetch when a tutor resolves.
+ * Rules are evaluated top-to-bottom; first matching rule with a valid library target wins.
+ * @typedef {Object} TutorPriorityRule
+ * @property {string} id
+ * @property {'named'|'type'|'subtype'|'effect_category'} target
+ * @property {string}  [cardName]       - target === 'named': exact card name to fetch
+ * @property {string}  [cardType]       - target === 'type': fetch any card of this main type
+ * @property {string}  [cardSubtype]    - target === 'subtype': fetch any card with this subtype
+ * @property {string}  [effectCategory] - target === 'effect_category': fetch any card with this category
+ * @property {boolean} [requireNotInHand] - if true, skip rule when any matching card is already in hand
+ */
+
+/**
  * A structured description of one effect on a card.
  * Built by detectEffectTags() at enrichment time, never recomputed at sim time.
  *
  * @typedef {Object} EffectTag
- * @property {'draw'|'ramp'|'tutor'|'removal'|'token'|'other'} category
- * @property {string}   subtype        - e.g. 'draw_n', 'loot', 'land_fetch', 'add_mana_tap'
- * @property {'etb'|'land_etb'|'creature_etb'|'cast'|'upkeep'|'tap'|'draw_step'|'end_step'|'opponent_cast'|'opponent_draw'|'attack'|'combat_damage'|'sacrifice'|'death'|'on_resolution'} timing
+ * @property {'draw'|'ramp'|'tutor'|'removal'|'token'|'replacement'|'other'} category
+ * @property {string}   subtype        - e.g. 'draw_n', 'loot', 'tutor', 'mana_rock'
+ * @property {'etb'|'land_etb'|'creature_etb'|'cast'|'upkeep'|'tap'|'draw_step'|'end_step'|'opponent_cast'|'opponent_draw'|'attack'|'combat_damage'|'sacrifice'|'death'|'on_resolution'|'static'} timing
  * @property {number|null} value       - cards drawn, mana added, etc. null for scaling effects
  * @property {boolean}  isConditional
  * @property {string|null} condition   - human-readable condition description
  * @property {TriggerFilter|null} [triggerFilter] - cast-timing trigger condition; null for self-ETB/upkeep/tap/passive
  * @property {string|null} [counterType]    - for draw_scaling_tap: counter name (e.g. 'burden')
  * @property {number|null} [expectedValue]  - User override: expected sim value for conditional effects (e.g. 2.0 expected draws)
+ * @property {FetchConstraint} [fetchType]  - tutor: what the card is allowed to search for
+ * @property {'hand'|'battlefield'|'top_of_library'} [putWhere]  - tutor: where the fetched card goes
  * @property {'simulatable'|'track_only'|'skip'} tier  - 'simulatable_soon' is a legacy value (treated as track_only)
  * @property {'auto'|'user'} source    - 'auto' = detected by enrichment; 'user' = added via the effect editor
  */
@@ -74,6 +101,8 @@
  * @property {string|null} manaCost
  * @property {string|null} power
  * @property {string|null} toughness
+ * @property {string[]}    supertypes  - e.g. ['Basic'] | ['Legendary'] | []
+ * @property {string[]}    subtypes    - e.g. ['Forest'] | ['Human','Wizard'] | []
  * @property {EffectTag[]} effectTags
  */
 
@@ -140,6 +169,8 @@
  * @property {boolean}        enriched        - true if cards have Scryfall data
  * @property {GoodHandDef[]}      goodHandDefs        - User-defined hand quality checks
  * @property {DiscardPriority[]}  discardPriorities   - Ordered loot discard rules (additive; defaults to [])
+ * @property {CastPriorityRule[]} [castPriorityRules]  - Ordered cast priority overrides (default: [])
+ * @property {TutorPriorityRule[]} [tutorPriorityRules] - Ordered tutor fetch rules (default: [])
  * @property {Object}             [xCosts]            - { [cardName]: number } user-set X values for X-cost spells
  * @property {StrategyConfig}     strategyConfig      - Simulation strategy (merged with defaults)
  */
@@ -187,6 +218,21 @@
  * @property {string}      id       - UUID
  * @property {string}      name     - User label, e.g. "Keepable Ramp Hand"
  * @property {Criterion[]} criteria
+ */
+
+/**
+ * A rule that overrides the default category-based cast ordering.
+ * Rules are evaluated in order; first match wins and assigns a strongly negative
+ * priority score that beats any category. A card with no matching rule falls
+ * through to the normal category + CMC tiebreak scoring.
+ *
+ * @typedef {Object} CastPriorityRule
+ * @property {string} id
+ * @property {'named'|'type'|'subtype'|'effect_category'} match
+ * @property {string}  [cardName]       - match === 'named': exact card name
+ * @property {string}  [cardType]       - match === 'type': e.g. 'Creature', 'Artifact'
+ * @property {string}  [cardSubtype]    - match === 'subtype': e.g. 'Elf', 'Equipment'
+ * @property {string}  [effectCategory] - match === 'effect_category': e.g. 'draw', 'ramp'
  */
 
 /**
