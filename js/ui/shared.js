@@ -16,9 +16,22 @@ export const TYPE_COLORS = {
   Unknown:      '#6b7280',
 };
 
+export const CATEGORY_COLORS = {
+  'Ramp':        '#22c55e',
+  'Mana Rock':   '#a3e635',
+  'Mana Dork':   '#34d399',
+  'Card Draw':   '#60a5fa',
+  'Interaction': '#22d3ee',
+  'Board Wipe':  '#f87171',
+  'Tutor':       '#c084fc',
+  'Mill':        '#94a3b8',
+  'Cascade':     '#fb923c',
+  'Discover':    '#e879f9',
+};
+
 export function escapeHtml(str) {
   if (!str) return '';
-  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 export function formatRelativeTime(isoString) {

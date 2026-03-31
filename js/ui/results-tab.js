@@ -1,300 +1,135 @@
 import { getResultsForDeck } from '../storage.js';
-import { TYPE_COLORS, escapeHtml, formatRelativeTime } from './shared.js';
+import { CATEGORY_COLORS, escapeHtml, formatRelativeTime } from './shared.js';
+import { CANONICAL_CATEGORIES } from '../types.js';
+import { hypgeomAtLeast, drawsNeeded } from '../hypergeometric.js';
 
-export function buildResultsTab(deck, simGameCount = 1000, simMaxTurns = 10) {
+const DEF_PALETTE = [
+  '#4ade80', '#60a5fa', '#fbbf24', '#fb923c', '#f87171',
+  '#34d399', '#a78bfa', '#f472b6', '#38bdf8', '#a3e635', '#e879f9', '#94a3b8',
+];
+
+export function buildResultsTab(deck) {
   const allResults = getResultsForDeck(deck.id);
   const latest = allResults[allResults.length - 1] || null;
 
-  const gameCountOptions = [100, 1000, 5000, 10000];
-  const turnOptions = [...Array.from({length: 10}, (_, i) => i + 1), 15, 20];
+  if (!latest) {
+    return `
+      <div class="section">
+        <div class="section-label">Results</div>
+        <p class="muted" style="font-size:12px">
+          No simulation run yet. Go to the Mulligan tab and click Run Simulation.
+        </p>
+      </div>`;
+  }
 
-  return `
-    <div class="sim-controls section">
-      <div class="section-label">Goldfishing</div>
-      <div class="control-row">
-        <label for="game-count">Games</label>
-        <select id="game-count" class="select" onchange="window.__sim.setGameCount(this.value)">
-          ${gameCountOptions.map(v =>
-            `<option value="${v}" ${simGameCount === v ? 'selected' : ''}>${v.toLocaleString()}</option>`
-          ).join('')}
-        </select>
-        <label for="max-turns">Turns</label>
-        <select id="max-turns" class="select" onchange="window.__sim.setMaxTurns(this.value)">
-          ${turnOptions.map(v =>
-            `<option value="${v}" ${simMaxTurns === v ? 'selected' : ''}>${v}</option>`
-          ).join('')}
-        </select>
-        <button id="run-sim-btn" class="btn-primary" data-deck-id="${deck.id}">
-          ▶ Goldfish
-        </button>
-      </div>
-    </div>
-    ${latest ? buildResultsPanel(latest, deck) : ''}
-  `;
+  return buildResultsPanel(latest, deck);
 }
 
 function buildResultsPanel(results, deck) {
   if (!results) return '';
-  const { summary, gamesSimulated, simulatedAt, enriched } = results;
-  const cardImageMap = Object.fromEntries((deck?.cards ?? []).map(c => [c.name, c]));
+  const { summary, gamesSimulated, simulatedAt } = results;
+
   return `
     <div class="results-panel section">
       <div class="section-label">
-        Results — ${gamesSimulated.toLocaleString()} games
+        Results — ${gamesSimulated.toLocaleString()} simulations
         <span class="muted" style="font-weight:400;margin-left:8px">${formatRelativeTime(simulatedAt)}</span>
-        ${enriched ? `<span class="tag tag-enriched" style="margin-left:8px;font-size:10px">Turn-by-turn</span>` : ''}
       </div>
 
-      <div class="results-grid">
-        ${buildGoodHandsPctCard(summary)}
-        ${buildResultCard(
-          'Avg Lands in Hand',
-          summary.avgTypeCounts['Land']?.toFixed(2) ?? '—',
-          'Out of 7 cards drawn',
-          null
-        )}
-        ${buildResultCard(
-          'Avg Non-Land Spells',
-          ((7 - (summary.avgTypeCounts['Land'] || 0)).toFixed(2)),
-          'Available turn 1',
-          null
-        )}
-      </div>
-
+      ${buildSummaryStats(summary)}
+      ${buildMulliganDepthChart(summary)}
       ${buildGoodHandDefResults(results)}
-
-      <div class="section-label" style="margin-top:20px">Opening Hand Type Breakdown</div>
-      ${buildCombinedTypeChart(summary.avgTypeCounts, summary.typeSeenPct, 7)}
-
-      ${enriched ? buildTurnByTurnPanel(summary, cardImageMap) : ''}
+      ${buildCastabilitySection(summary)}
+      ${buildCategoryHandStats(summary)}
+      ${buildPerCardAnalysis(deck)}
     </div>
   `;
 }
 
-// ─── Component Builders ───────────────────────────────────────────────────────
+// ─── Summary Stat Cards ───────────────────────────────────────────────────────
 
-function buildTypeBreakdownBars(typeCounts, total) {
-  const entries = Object.entries(typeCounts)
-    .filter(([, v]) => v > 0)
-    .sort(([, a], [, b]) => b - a);
+function buildSummaryStats(summary) {
+  const avgHand = summary.avgHandSize?.toFixed(2) ?? '7.00';
+  const greediness = summary.greediness != null ? `${summary.greediness}%` : '—';
 
-  return `
-    <div class="type-bars">
-      <div class="bar-track">
-        ${entries.map(([type, count]) => {
-          const pct = (count / total) * 100;
-          return `<div class="bar-segment tooltip-parent"
-            style="width:${pct}%;background:${TYPE_COLORS[type] || TYPE_COLORS.Other}"
-            title="${type}: ${count} (${pct.toFixed(1)}%)">
-            <span class="tooltip">${type}: ${count}</span>
-          </div>`;
-        }).join('')}
-      </div>
-      <div class="bar-legend">
-        ${entries.map(([type, count]) => `
-          <div class="legend-item">
-            <span class="legend-dot" style="background:${TYPE_COLORS[type] || TYPE_COLORS.Other}"></span>
-            <span>${type}</span>
-            <span class="muted">${count}</span>
-          </div>`).join('')}
-      </div>
-    </div>`;
-}
-
-function buildResultCard(label, value, sublabel, quality, extra = '') {
-  const qualityClass = quality ? `result-card--${quality}` : '';
-  return `
-    <div class="result-card ${qualityClass}">
-      <div class="result-value">${value}</div>
-      <div class="result-label">${label}</div>
-      <div class="result-sub muted">${sublabel}</div>
-      ${extra}
-    </div>`;
-}
-
-/**
- * Build the "Good Opening Hands" stat card.
- * Uses goodHandAnyPct (% matching any definition) when definitions exist,
- * otherwise falls back to the land-count heuristic.
- */
-function buildGoodHandsPctCard(summary) {
   const anyPct = summary.goodHandAnyPct;
+  let keepCard;
   if (anyPct !== null && anyPct !== undefined) {
     const quality = anyPct >= 60 ? 'good' : anyPct >= 40 ? 'warn' : 'bad';
-    return buildResultCard('Good Opening Hands', `${anyPct}%`, 'Matches any good hand definition', quality);
+    keepCard = buildResultCard('Kept Condition', `${anyPct}%`, 'Matched any keep def', quality);
+  } else {
+    const landPct = summary.goodLandHandPct;
+    const quality = landPct >= 60 ? 'good' : landPct >= 40 ? 'warn' : 'bad';
+    keepCard = buildResultCard('≥3 Lands', `${landPct}%`, 'Hands with 3+ lands', quality);
   }
-  // Fallback: land heuristic
-  const landPct = summary.goodLandHandPct;
-  const quality = landPct >= 60 ? 'good' : landPct >= 40 ? 'warn' : 'bad';
-  return buildResultCard('Good Opening Hands', `${landPct}%`, 'Hands with ≥3 lands (add definitions to customize)', quality);
-}
 
-/**
- * Combined chart: avg count per type (bar) + % of hands containing each type.
- */
-function buildCombinedTypeChart(avgCounts, seenPcts, handSize) {
-  const entries = Object.entries(avgCounts)
-    .filter(([, v]) => v > 0)
-    .sort(([, a], [, b]) => b - a);
+  const avgCastTurn = summary.avgCastableTurn;
+  const castCard = avgCastTurn !== null && avgCastTurn !== undefined
+    ? buildResultCard('Avg Cast Turn', `T${avgCastTurn}`, 'Commander castable', null)
+    : '';
 
   return `
-    <div class="hand-chart">
-      <div class="hand-chart-row hand-chart-header">
-        <div class="hand-chart-label"></div>
-        <div class="hand-chart-bar-track"></div>
-        <div class="hand-chart-value muted" style="font-size:10px">Avg</div>
-        <div class="hand-chart-seen muted" style="font-size:10px">% of Hands</div>
-      </div>
-      ${entries.map(([type, avg]) => {
-        const barPct = (avg / handSize) * 100;
-        const seenPct = seenPcts[type] ?? 0;
-        const color = TYPE_COLORS[type] || TYPE_COLORS.Other;
-        return `
-          <div class="hand-chart-row">
-            <div class="hand-chart-label">
-              <span class="legend-dot" style="background:${color}"></span>
-              ${type}
-            </div>
-            <div class="hand-chart-bar-track">
-              <div class="hand-chart-bar" style="width:${barPct}%;background:${color}"></div>
-            </div>
-            <div class="hand-chart-value">${avg.toFixed(2)}</div>
-            <div class="hand-chart-seen muted">${seenPct}%</div>
-          </div>`;
-      }).join('')}
+    <div class="results-grid">
+      ${keepCard}
+      ${buildResultCard('Avg Hand Size', avgHand, 'After mulligans', null)}
+      ${buildResultCard('Greediness', greediness, '% games mulliganed', null)}
+      ${castCard}
     </div>`;
 }
 
-/**
- * Build the turn-by-turn stats panel (only shown for enriched decks).
- * @param {Object} summary
- */
-function buildTurnByTurnPanel(summary, cardImageMap = {}) {
-  const { avgCardsDrawnByTurn, avgEffectDrawsPerGame, pctGamesWithDrawEffect, drawEffectSourceBreakdown, avgManaByTurn, avgManaFromRocksPerGame, avgMissedLandDrops, avgRocksPlayedPerGame } = summary;
+// ─── Mulligan Depth Histogram ─────────────────────────────────────────────────
 
-  if (!avgCardsDrawnByTurn || Object.keys(avgCardsDrawnByTurn).length === 0) return '';
+function buildMulliganDepthChart(summary) {
+  const keepByDepth = summary.keepRateByDepth;
+  if (!keepByDepth) return '';
 
-  // Cards drawn by turn table
-  const turnEntries = Object.entries(avgCardsDrawnByTurn).sort(([a], [b]) => Number(a) - Number(b));
-  const turnRows = turnEntries.map(([turn, avg]) => `
-    <div class="hand-chart-row">
-      <div class="hand-chart-label">Turn ${turn}</div>
-      <div class="hand-chart-bar-track">
-        <div class="hand-chart-bar" style="width:${Math.min((avg / 30) * 100, 100)}%;background:#60a5fa"></div>
-      </div>
-      <div class="hand-chart-value">${avg.toFixed(1)}</div>
-    </div>`).join('');
+  const DEPTH_LABELS = {
+    0: 'Kept 7 (no mull)',
+    1: 'Kept 7 (free mull)',
+    2: 'Kept 6',
+    3: 'Kept 5',
+    4: 'Kept 4',
+    5: 'Kept 3',
+    6: 'Kept 2',
+    7: 'Kept 1 (forced)',
+  };
 
-  // Draw engine source breakdown
-  const sourceEntries = Object.entries(drawEffectSourceBreakdown || {})
-    .sort(([, a], [, b]) => b - a);
+  const entries = Object.entries(keepByDepth);
+  const maxPct = Math.max(1, ...entries.map(([, v]) => v));
 
-  const CHART_COLORS = [
-    '#4ade80', '#60a5fa', '#fbbf24', '#c084fc', '#fb923c', '#f87171',
-    '#34d399', '#818cf8', '#f472b6', '#38bdf8', '#a3e635', '#fb7185',
-    '#e879f9', '#facc15', '#4dd0e1', '#ff8a65',
-  ];
-
-  const sourceRows = sourceEntries.map(([name, avg], idx) => {
-    const color   = CHART_COLORS[idx % CHART_COLORS.length];
-    const imgUrl  = escapeHtml(cardImageMap[name]?.imageUrl     || '');
-    const backUrl = escapeHtml(cardImageMap[name]?.backImageUrl || '');
+  const cols = entries.map(([depth, pct]) => {
+    const label = DEPTH_LABELS[depth] ?? `Depth ${depth}`;
+    const color = DEF_PALETTE[Number(depth)] ?? '#94a3b8';
+    const barPct = Math.round((pct / maxPct) * 100);
     return `
-      <div class="hand-chart-row">
-        <div class="hand-chart-label" style="max-width:180px;overflow:hidden;text-overflow:ellipsis;cursor:default"
-          data-image-url="${imgUrl}" data-back-image-url="${backUrl}"
-          onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
-          onmouseleave="window.__preview?.hide()">
-          <span class="legend-dot" style="background:${color}"></span>
-          ${escapeHtml(name)}
+      <div class="mc-col" title="${label}: ${pct}%">
+        <div class="mc-col-bar-wrap">
+          <div class="mc-col-bar" style="height:${barPct}%;background:${color}"></div>
         </div>
-        <div class="hand-chart-bar-track">
-          <div class="hand-chart-bar" style="width:${Math.min(avg * 20, 100)}%;background:${color}"></div>
-        </div>
-        <div class="hand-chart-value">${avg.toFixed(1)}</div>
+        <div class="mc-col-count" style="color:${color}">${pct}%</div>
+        <div class="mc-col-label">${Number(depth) <= 1 ? (depth === '0' ? 'K7' : 'K7f') : `K${7 - (Number(depth) - 1)}`}</div>
       </div>`;
   }).join('');
 
-  return `
-    <div class="section-label" style="margin-top:20px">Cumulative Cards Drawn by Turn</div>
-    <div class="hand-chart">
-      <div class="hand-chart-row hand-chart-header">
-        <div class="hand-chart-label"></div>
-        <div class="hand-chart-bar-track"></div>
-        <div class="hand-chart-value muted" style="font-size:10px">Avg</div>
-      </div>
-      ${turnRows}
-    </div>
-
-    <div class="results-grid" style="margin-top:16px">
-      ${buildResultCard(
-        'Avg Effect Draws/Game',
-        (avgEffectDrawsPerGame ?? 0).toFixed(1),
-        'Cards from ETB/upkeep effects',
-        null
-      )}
-      ${buildResultCard(
-        'Games with Draw Engine',
-        `${pctGamesWithDrawEffect ?? 0}%`,
-        'Had ≥1 draw source on board',
-        null
-      )}
-    </div>
-
-    ${sourceEntries.length > 0 ? `
-      <div class="section-label" style="margin-top:16px">Draw Effect Sources (avg draws/game)</div>
-      <div class="hand-chart">${sourceRows}</div>
-    ` : ''}
-
-    ${avgManaByTurn && Object.keys(avgManaByTurn).length > 0 ? buildManaChart(avgManaByTurn, avgManaFromRocksPerGame, avgRocksPlayedPerGame, avgMissedLandDrops) : ''}
-  `;
-}
-
-function buildManaChart(avgManaByTurn, avgManaFromRocksPerGame, avgRocksPlayedPerGame, avgMissedLandDrops) {
-  const turnEntries = Object.entries(avgManaByTurn).sort(([a], [b]) => Number(a) - Number(b));
-  const maxMana = Math.max(...turnEntries.map(([, v]) => v), 1);
-  const manaRows = turnEntries.map(([turn, avg]) => `
-    <div class="hand-chart-row">
-      <div class="hand-chart-label">Turn ${turn}</div>
-      <div class="hand-chart-bar-track">
-        <div class="hand-chart-bar" style="width:${Math.min((avg / maxMana) * 100, 100)}%;background:#f0b429"></div>
-      </div>
-      <div class="hand-chart-value">${avg.toFixed(1)}</div>
-    </div>`).join('');
+  // Legend
+  const legend = entries.map(([depth, pct]) => {
+    const label = DEPTH_LABELS[depth] ?? `Depth ${depth}`;
+    const color = DEF_PALETTE[Number(depth)] ?? '#94a3b8';
+    return `<span class="mull-legend-item"><span class="legend-dot" style="background:${color}"></span>${label} <strong>${pct}%</strong></span>`;
+  }).join('');
 
   return `
-    <div class="results-grid" style="margin-top:20px">
-      ${buildResultCard('Avg Rock Mana/Game', (avgManaFromRocksPerGame ?? 0).toFixed(1), 'Total mana from non-land sources over all turns', null)}
-      ${buildResultCard('Avg Ramp Plays/Game', (avgRocksPlayedPerGame ?? 0).toFixed(1), 'Mana rocks & ramp creatures cast', null)}
-      ${buildResultCard('Avg Missed Land Drops', (avgMissedLandDrops ?? 0).toFixed(1), 'Turns with no land played', null)}
-    </div>
-    <div class="section-label" style="margin-top:16px">Avg Mana Available by Turn</div>
-    <div class="hand-chart">
-      <div class="hand-chart-row hand-chart-header">
-        <div class="hand-chart-label"></div>
-        <div class="hand-chart-bar-track"></div>
-        <div class="hand-chart-value muted" style="font-size:10px">Avg</div>
-      </div>
-      ${manaRows}
-    </div>
-  `;
+    <div class="section-label" style="margin-top:20px">Mulligan Depth</div>
+    <div class="mc-col-chart mc-col-chart--mull">${cols}</div>
+    <div class="mull-legend">${legend}</div>`;
 }
 
-/**
- * Render good hand def percentage bars inside the simulation results panel.
- */
+// ─── Keep Condition Results ───────────────────────────────────────────────────
+
 function buildGoodHandDefResults(results) {
   const pcts = results?.summary?.goodHandDefPcts;
-
-  // Retrieve def names from the stored results snapshot
   const defEntries = Object.entries(pcts || {});
   if (!defEntries.length) return '';
-
-  // Distinct palette so each definition gets a unique bar color
-  const DEF_PALETTE = [
-    '#60a5fa', '#4ade80', '#fbbf24', '#c084fc', '#fb923c', '#f87171',
-    '#34d399', '#a78bfa', '#f472b6', '#38bdf8', '#a3e635', '#e879f9',
-  ];
 
   const rows = defEntries.map(([defId, pct], idx) => {
     const name = results.goodHandDefNames?.[defId] || defId;
@@ -327,6 +162,233 @@ function buildGoodHandDefResults(results) {
       </div>` : '';
 
   return `
-    <div class="section-label" style="margin-top:20px">Good Hand Definition Results</div>
+    <div class="section-label" style="margin-top:20px">Keep Condition Results</div>
     <div class="hand-chart">${rows}${totalRow}</div>`;
+}
+
+// ─── Commander Castability Curve ──────────────────────────────────────────────
+
+function buildCastabilitySection(summary) {
+  const castByTurn = summary.castabilityByTurn;
+  if (!castByTurn || Object.keys(castByTurn).length === 0) return '';
+
+  const castEntries = Object.entries(castByTurn);
+  const maxCastPct = Math.max(1, ...castEntries.map(([, v]) => v));
+
+  const cols = castEntries.map(([turn, pct]) => {
+    const color = DEF_PALETTE[(Number(turn) - 1) % DEF_PALETTE.length];
+    const barPct = Math.round((pct / maxCastPct) * 100);
+    return `
+      <div class="mc-col" title="Turn ${turn}: ${pct}%">
+        <div class="mc-col-bar-wrap">
+          <div class="mc-col-bar" style="height:${barPct}%;background:${color}"></div>
+        </div>
+        <div class="mc-col-count" style="color:${color}">${pct}%</div>
+        <div class="mc-col-label">T${turn}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="section-label" style="margin-top:20px">Commander Castability by Turn</div>
+    <p class="muted" style="font-size:11px;margin-bottom:8px">Cumulative probability of having enough mana to cast your commander by turn N.</p>
+    <div class="mc-col-chart mc-col-chart--cast">${cols}</div>`;
+}
+
+// ─── Category Coverage in Kept Hands ─────────────────────────────────────────
+
+function buildCategoryHandStats(summary) {
+  const cats = summary.avgCategoryCounts;
+  if (!cats) return '';
+
+  const nonZero = CANONICAL_CATEGORIES.filter(cat => (cats[cat] || 0) > 0);
+  if (!nonZero.length) return '';
+
+  const rows = nonZero.map(cat => {
+    const avg = cats[cat].toFixed(2);
+    const color = CATEGORY_COLORS[cat] || '#6b7280';
+    const barPct = Math.min(100, Math.round((cats[cat] / 3) * 100));
+    return `
+      <div class="hand-chart-row">
+        <div class="hand-chart-label">
+          <span class="legend-dot" style="background:${color}"></span>
+          ${cat}
+        </div>
+        <div class="hand-chart-bar-track">
+          <div class="hand-chart-bar" style="width:${barPct}%;background:${color}"></div>
+        </div>
+        <div class="hand-chart-value">${avg}</div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="section-label" style="margin-top:20px">Avg Category Cards in Kept Hand</div>
+    <div class="hand-chart">${rows}</div>`;
+}
+
+// ─── Per-Card Draw Probability Analysis ──────────────────────────────────────
+
+/**
+ * Get a card's effective draw count: categoryValues first, then effectTags fallback.
+ */
+function getDrawCount(card) {
+  const stored = card.categoryValues?.['Card Draw'];
+  if (stored != null && stored > 0) return stored;
+  const tag = card.effectTags?.find(t => t.subtype === 'draw_n' && t.value > 0);
+  return tag?.value ?? null;
+}
+
+function getMillCount(card) {
+  const stored = card.categoryValues?.['Mill'];
+  if (stored != null && stored > 0) return stored;
+  return null;
+}
+
+/**
+ * Build the shared probability table for a given draw/mill count N.
+ * Library: deckTotal - 7 cards after opening hand.
+ * Shows P(≥1) per use and uses needed to reach 80%/95% for each category.
+ */
+function buildDrawProbTable(drawN, deck) {
+  const allCards = deck.cards;
+  const deckTotal = allCards.reduce((s, c) => s + c.quantity, 0);
+  const libSize = Math.max(1, deckTotal - 7);
+
+  // Count each category in the full deck (proxy for library after avg hand)
+  const catCounts = {};
+  for (const cat of CANONICAL_CATEGORIES) {
+    catCounts[cat] = allCards
+      .filter(c => c.categories?.includes(cat))
+      .reduce((s, c) => s + c.quantity, 0);
+  }
+  // Also include Land as a target
+  const landCount = allCards
+    .filter(c => c.types?.includes('Land'))
+    .reduce((s, c) => s + c.quantity, 0);
+
+  const targets = [
+    { label: 'Land', K: landCount, color: '#94a3b8' },
+    ...CANONICAL_CATEGORIES
+      .filter(cat => catCounts[cat] > 0)
+      .map(cat => ({ label: cat, K: catCounts[cat], color: CATEGORY_COLORS[cat] || '#6b7280' })),
+  ];
+
+  const rows = targets.map(({ label, K, color }) => {
+    const pPerUse = (hypgeomAtLeast(1, libSize, K, drawN) * 100).toFixed(1);
+    const d80 = drawsNeeded(libSize, K, 0.80);
+    const d95 = drawsNeeded(libSize, K, 0.95);
+    const uses80 = d80 === Infinity ? '∞' : Math.ceil(d80 / drawN);
+    const uses95 = d95 === Infinity ? '∞' : Math.ceil(d95 / drawN);
+    const barPct = Math.min(100, Math.round(parseFloat(pPerUse)));
+
+    return `
+      <div class="draw-prob-row">
+        <div class="draw-prob-label">
+          <span class="legend-dot" style="background:${color}"></span>
+          <span>${escapeHtml(label)}</span>
+          <span class="muted" style="font-size:10px">(${K})</span>
+        </div>
+        <div class="draw-prob-bar-wrap">
+          <div class="draw-prob-bar" style="width:${barPct}%;background:${color}"></div>
+        </div>
+        <div class="draw-prob-stat">${pPerUse}%</div>
+        <div class="draw-prob-uses muted">${uses80}×<span style="font-size:9px"> 80%</span></div>
+        <div class="draw-prob-uses muted">${uses95}×<span style="font-size:9px"> 95%</span></div>
+      </div>`;
+  }).join('');
+
+  return `
+    <div class="draw-prob-table">
+      <div class="draw-prob-row draw-prob-header">
+        <div class="draw-prob-label muted" style="font-size:10px">Category (K in deck)</div>
+        <div class="draw-prob-bar-wrap"></div>
+        <div class="draw-prob-stat muted" style="font-size:10px">P(≥1)/use</div>
+        <div class="draw-prob-uses muted" style="font-size:10px">Uses@80%</div>
+        <div class="draw-prob-uses muted" style="font-size:10px">Uses@95%</div>
+      </div>
+      ${rows}
+    </div>
+    <p class="muted" style="font-size:10px;margin-top:4px">
+      Library: ${libSize} cards (deck − opening hand). P(≥1) = probability of hitting ≥1 of that category per use.
+    </p>`;
+}
+
+/**
+ * Per-card analysis section: expandable rows for draw/mill cards.
+ * Uses <details>/<summary> for zero-JS accordion.
+ */
+function buildPerCardAnalysis(deck) {
+  const allCards = deck.cards;
+
+  const drawCards = allCards.filter(c => {
+    if (!c.categories?.includes('Card Draw')) return false;
+    return getDrawCount(c) != null;
+  });
+
+  const millCards = allCards.filter(c => {
+    if (!c.categories?.includes('Mill')) return false;
+    return getMillCount(c) != null;
+  });
+
+  const cascadeCards = allCards.filter(c =>
+    c.categories?.includes('Cascade') || c.categories?.includes('Discover')
+  );
+
+  if (drawCards.length === 0 && millCards.length === 0 && cascadeCards.length === 0) {
+    return '';
+  }
+
+  const buildCardSection = (cards, getCount, label) => cards.map(card => {
+    const n = getCount(card);
+    const tableHTML = buildDrawProbTable(n, deck);
+    const qty = card.quantity > 1 ? `<span class="muted">${card.quantity}×</span> ` : '';
+    return `
+      <details class="card-analysis-item">
+        <summary class="card-analysis-summary">
+          ${qty}<span class="card-analysis-name">${escapeHtml(card.name)}</span>
+          <span class="card-analysis-badge">${label} ${n}</span>
+        </summary>
+        <div class="card-analysis-body">
+          ${tableHTML}
+        </div>
+      </details>`;
+  }).join('');
+
+  const cascadeRows = cascadeCards.map(card => {
+    const cmc = card.cmc ?? '?';
+    const qty = card.quantity > 1 ? `<span class="muted">${card.quantity}×</span> ` : '';
+    const cat = card.categories?.includes('Cascade') ? 'Cascade' : 'Discover';
+    return `
+      <details class="card-analysis-item">
+        <summary class="card-analysis-summary">
+          ${qty}<span class="card-analysis-name">${escapeHtml(card.name)}</span>
+          <span class="card-analysis-badge">${cat} · CMC ${cmc}</span>
+        </summary>
+        <div class="card-analysis-body">
+          <p class="muted" style="font-size:11px">
+            ${cat} hits any non-land card with CMC &lt; ${cmc}. Negative hypergeometric analysis coming in a future update.
+          </p>
+        </div>
+      </details>`;
+  }).join('');
+
+  return `
+    <div class="section-label" style="margin-top:20px">Per-Card Analysis</div>
+    <p class="muted" style="font-size:11px;margin-bottom:8px">
+      Probability of hitting each deck category when you use a draw/mill effect. Expand a card to see curves.
+    </p>
+    ${buildCardSection(drawCards, getDrawCount, 'draws')}
+    ${buildCardSection(millCards, getMillCount, 'mills')}
+    ${cascadeRows}`;
+}
+
+// ─── Shared Components ────────────────────────────────────────────────────────
+
+function buildResultCard(label, value, sublabel, quality) {
+  const qualityClass = quality ? `result-card--${quality}` : '';
+  return `
+    <div class="result-card ${qualityClass}">
+      <div class="result-value">${value}</div>
+      <div class="result-label">${label}</div>
+      <div class="result-sub muted">${sublabel}</div>
+    </div>`;
 }

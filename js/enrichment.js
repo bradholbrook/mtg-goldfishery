@@ -12,6 +12,7 @@
  */
 
 import { detectEffectTags, detectEtbTapped } from './effects.js';
+import { fetchOracleTags, mapTagsToCategories } from './tagger.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -204,7 +205,7 @@ function extractEnrichmentFields(scryfallCard) {
         manaCost: face.mana_cost || null,
         power: face.power ?? null,
         toughness: face.toughness ?? null,
-        effectTags: detectEffectTags(faceOracleText, faceKeywords, faceTypes),
+        effectTags: detectEffectTags(faceOracleText, { keywords: faceKeywords, cardTypes: faceTypes }),
       };
     });
 
@@ -221,6 +222,8 @@ function extractEnrichmentFields(scryfallCard) {
     // For MDFCs, check the land face for ETB-tapped status
     const landFace = faces.find(f => f.types?.includes('Land'));
 
+    const oracleId = scryfallCard.oracle_id || null;
+
     return {
       oracleText: frontFace.oracleText,
       cmc: frontFace.cmc ?? scryfallCard.cmc ?? null,
@@ -230,8 +233,13 @@ function extractEnrichmentFields(scryfallCard) {
         : null,
       producedMana: scryfallCard.produced_mana || null,
       scryfallId: scryfallCard.id || null,
+      oracleId,
+      set: scryfallCard.set || null,
+      collectorNumber: scryfallCard.collector_number || null,
       enriched: true,
       effectTags,
+      categories: [],
+      otags: [],
       types,
       isMDFC: true,
       faces,
@@ -260,7 +268,8 @@ function extractEnrichmentFields(scryfallCard) {
   const types = scryfallCard.types?.length ? scryfallCard.types : typeLineToTypes(typeLine);
   const supertypes = scryfallCard.supertypes ?? typeLineToSupertypes(typeLine);
   const subtypes = scryfallCard.subtypes ?? typeLineToSubtypes(typeLine);
-  const effectTags = detectEffectTags(oracleText, keywords, types ?? []);
+  const effectTags = detectEffectTags(oracleText, { keywords: keywords ?? [], cardTypes: types });
+  const oracleId = scryfallCard.oracle_id || null;
 
   return {
     oracleText,
@@ -269,8 +278,13 @@ function extractEnrichmentFields(scryfallCard) {
     keywords: keywords.length > 0 ? keywords : null,
     producedMana: scryfallCard.produced_mana || null,
     scryfallId: scryfallCard.id || null,
+    oracleId,
+    set: scryfallCard.set || null,
+    collectorNumber: scryfallCard.collector_number || null,
     enriched: true,
     effectTags,
+    categories: [],
+    otags: [],
     types,
     supertypes,
     subtypes,
@@ -303,8 +317,9 @@ function extractEnrichmentFields(scryfallCard) {
  * @param {function(string):void} [onProgress]    - Optional status callback (message string)
  * @returns {Promise<import('./types.js').DeckConfig>} deck with enrichment fields added
  */
-export async function enrichDeckWithScryfall(deck, onProgress = null) {
+export async function enrichDeckWithScryfall(deck, onProgress = null, onError = null) {
   const notify = msg => { if (onProgress) onProgress(msg); };
+  const notifyError = msg => { if (onError) onError(msg); };
 
   // Collect unique card names (cards array may have multiple entries with same name)
   const uniqueNames = [...new Set(deck.cards.map(c => c.name))];
@@ -353,7 +368,7 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
             enrichmentMap.set(name, extractEnrichmentFields(scryfallCard));
           } else {
             // Card not found on Scryfall — log for debugging
-            console.warn(`[goldfishery] Scryfall did not find card: "${name}"`);
+            console.warn(`[mullstat] Scryfall did not find card: "${name}"`);
             enrichmentMap.set(name, {
               oracleText: null,
               cmc: null,
@@ -361,8 +376,13 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
               keywords: null,
               producedMana: null,
               scryfallId: null,
+              oracleId: null,
+              set: null,
+              collectorNumber: null,
               enriched: false,
               effectTags: [],
+              otags: [],
+              categories: [],
               types: null,
               supertypes: [],
               subtypes: [],
@@ -384,8 +404,13 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
               keywords: null,
               producedMana: null,
               scryfallId: null,
+              oracleId: null,
+              set: null,
+              collectorNumber: null,
               enriched: false,
               effectTags: [],
+              otags: [],
+              categories: [],
               types: null,
               supertypes: [],
               subtypes: [],
@@ -400,16 +425,52 @@ export async function enrichDeckWithScryfall(deck, onProgress = null) {
     }
   }
 
+  // ── Fetch oracle tags from Cloudflare Worker ──────────────────────────────
+  const seenOracles = new Set();
+  const cardsForTagger = [...enrichmentMap.entries()]
+    .filter(([, f]) => f.enriched && f.oracleId && f.set && f.collectorNumber)
+    .filter(([, f]) => {
+      if (seenOracles.has(f.oracleId)) return false;
+      seenOracles.add(f.oracleId);
+      return true;
+    })
+    .map(([, f]) => ({ oracleId: f.oracleId, set: f.set, collectorNumber: f.collectorNumber }));
+
+  if (cardsForTagger.length > 0) {
+    notify(`Fetching oracle tags for ${cardsForTagger.length} card(s)…`);
+    const { tags: tagMap, failed: tagsFailed } = await fetchOracleTags(cardsForTagger);
+    if (tagsFailed) notifyError('Tag enrichment failed — card categories may be incomplete. If this persists, try again tomorrow.');
+
+    for (const [name, fields] of enrichmentMap) {
+      if (!fields.oracleId) continue;
+      const slugs = tagMap.get(fields.oracleId) ?? [];
+      fields.otags = slugs;
+      fields.categories = mapTagsToCategories(slugs, fields.keywords ?? [], fields.oracleText);
+    }
+  }
+
   // ── Merge enrichment fields onto card objects ──────────────────────────────
   const enrichedCards = deck.cards.map(card => {
     const fields = enrichmentMap.get(card.name);
     if (!fields) return { ...card, effectTags: [], enriched: false };
 
-    return {
+    const merged = {
       ...card,
       ...fields,
       types: fields.types ?? card.types,
     };
+
+    // Override image URL with Moxfield-selected printing if available
+    if (card.moxfieldScryfallId) {
+      const id = card.moxfieldScryfallId;
+      merged.imageUrl = `https://cards.scryfall.io/normal/front/${id[0]}/${id[1]}/${id}.jpg`;
+      // Back face for DFCs (only if the card actually has a back face)
+      if (merged.backImageUrl) {
+        merged.backImageUrl = `https://cards.scryfall.io/normal/back/${id[0]}/${id[1]}/${id}.jpg`;
+      }
+    }
+
+    return merged;
   });
 
   notify('Enrichment complete.');

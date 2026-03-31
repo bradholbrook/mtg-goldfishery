@@ -106,6 +106,24 @@ export const CRITERION_TYPES = {
     },
   },
 
+  has_category: {
+    id:    'has_category',
+    label: 'Has card(s) of category',
+    fields: [
+      { key: 'count',    widget: 'number',          label: 'Count', min: 1, max: 7 },
+      { key: 'category', widget: 'category_select', label: 'Category' },
+    ],
+    defaultValues: () => ({ count: 1, category: 'Ramp' }),
+    evaluate(criterion, hand) {
+      const cat = criterion.category || 'Ramp';
+      const n = hand.filter(c => Array.isArray(c.categories) && c.categories.includes(cat)).length;
+      return n >= (Number(criterion.count) || 1);
+    },
+    describe(criterion) {
+      return `≥${criterion.count || 1} ${criterion.category || 'Ramp'}`;
+    },
+  },
+
 };
 
 /** Ordered array for populating the type dropdown */

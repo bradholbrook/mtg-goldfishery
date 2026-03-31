@@ -1,5 +1,5 @@
 /**
- * MTG Goldfish Simulator - App Entry Point
+ * mullstat - App Entry Point
  *
  * Wires together: parser → storage → simulator → ui
  * Handles all user events.
@@ -12,10 +12,8 @@ import {
   getDeckById, saveToFile, loadFromFile,
   updateDeckGoodHandDefs, removeGoodHandDef,
   updateDeckDiscardPriorities,
-  updateDeckCastPriorityRules,
-  updateDeckTutorPriorityRules,
-  updateDeckXCost,
   renameDeck,
+  clearResultsForDeck,
 } from './storage.js';
 import {
   renderDeckList, renderActiveDeck, showToast,
@@ -24,7 +22,14 @@ import {
 import { generateId } from './types.js';
 import { CRITERION_TYPES, evaluateGoodHandDef } from './criteria.js';
 import { enrichDeckWithScryfall } from './enrichment.js';
-import { EFFECT_TYPES, EFFECT_TYPE_OPTIONS, resolveCastFilter } from './effect-types.js';
+import { mapTagsToCategories } from './tagger.js';
+import { CATEGORY_TAG_SUBTYPE } from './ui/cards-tab.js';
+import {
+  addCategory, removeCategory, renameCategory, setCategoryColor,
+  setOtagMapping, removeOtagMapping, resetCategoryConfig,
+  getEffectiveCategoryNames, getEffectiveOtagMappings,
+  exportCategoryConfig, importCategoryConfig,
+} from './category-config.js';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -38,23 +43,94 @@ let activeDeckId = null;
  */
 let editingDef = null;
 
-let activeTab = 'cards';
+let activeTab = 'dashboard';
 
-/** Card names currently expanded in the Cards tab effect editor. */
-const expandedEffectCards = new Set();
-
-/** Type names currently expanded in the Overview tab type list. */
+/** Type names currently expanded in the Card Tags tab type list. */
 const expandedTypeGroups = new Set();
 
-/** Persistent simulate tab settings — survive re-renders. */
-let simGameCount = 1000;
-let simMaxTurns = 10;
+/** Card names currently expanded in the Card Tags tab detail view. */
+const expandedCards = new Set();
+
+/** Whether the Category Config <details> panel is open in the Card Tags tab. */
+let categoryConfigOpen = false;
+
+/** Current otag search filter (persisted across refresh so type-group toggle doesn't clear it). */
+let otagSearchQuery = '';
+
+// ─── Modal Dialogs ────────────────────────────────────────────────────────────
+
+function showConfirmModal(message, onConfirm, { title = 'Confirm', confirmLabel = 'Confirm', danger = false } = {}) {
+  const overlay = document.createElement('div');
+  overlay.className = 'app-modal-overlay';
+  overlay.innerHTML = `
+    <div class="app-modal">
+      <div class="app-modal-header">
+        <span>${title}</span>
+        <button class="btn-icon" id="_modal-close">✕</button>
+      </div>
+      <div class="app-modal-body">${message}</div>
+      <div class="app-modal-footer">
+        <button class="btn-secondary" id="_modal-cancel">Cancel</button>
+        <button class="${danger ? 'btn-danger-filled' : 'btn-primary'}" id="_modal-confirm">${confirmLabel}</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  overlay.querySelector('#_modal-close').addEventListener('click', close);
+  overlay.querySelector('#_modal-cancel').addEventListener('click', close);
+  overlay.querySelector('#_modal-confirm').addEventListener('click', () => { close(); onConfirm(); });
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+}
+
+function showPromptModal(message, defaultValue, onConfirm, { title = 'Enter Value' } = {}) {
+  const overlay = document.createElement('div');
+  overlay.className = 'app-modal-overlay';
+  overlay.innerHTML = `
+    <div class="app-modal">
+      <div class="app-modal-header">
+        <span>${title}</span>
+        <button class="btn-icon" id="_modal-close">✕</button>
+      </div>
+      <div class="app-modal-body">
+        <div style="margin-bottom:8px">${message}</div>
+        <input class="input-text" id="_modal-input" type="text" value="${defaultValue.replace(/"/g, '&quot;')}" style="width:100%;box-sizing:border-box" />
+      </div>
+      <div class="app-modal-footer">
+        <button class="btn-secondary" id="_modal-cancel">Cancel</button>
+        <button class="btn-primary" id="_modal-confirm">OK</button>
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const close = () => overlay.remove();
+  const input = overlay.querySelector('#_modal-input');
+  const confirm = () => { const v = input.value.trim(); if (v) { close(); onConfirm(v); } };
+  overlay.querySelector('#_modal-close').addEventListener('click', close);
+  overlay.querySelector('#_modal-cancel').addEventListener('click', close);
+  overlay.querySelector('#_modal-confirm').addEventListener('click', confirm);
+  input.addEventListener('keydown', e => { if (e.key === 'Enter') confirm(); if (e.key === 'Escape') close(); });
+  overlay.addEventListener('click', e => { if (e.target === overlay) close(); });
+  setTimeout(() => { input.focus(); input.select(); }, 50);
+}
+
+// ─── Category Helpers ─────────────────────────────────────────────────────────
+
+/** Re-derive categories for every card in the active deck from current otag mappings. */
+function rederiveAllCardCategories() {
+  const deck = getDeckById(activeDeckId);
+  if (!deck) return;
+  const otagMap = getEffectiveOtagMappings();
+  for (const card of deck.cards) {
+    card.categories = mapTagsToCategories(card.otags || [], card.keywords ?? [], card.oracleText, otagMap);
+  }
+  clearResultsForDeck(deck.id);
+}
 
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
   bindImportPanel();
   bindSaveLoad();
+  bindCategoryConfig();
   refresh();
 
   // Close card multiselect dropdowns when clicking outside them
@@ -69,7 +145,13 @@ document.addEventListener('DOMContentLoaded', () => {
 
 function refresh() {
   renderDeckList(handleSelectDeck, handleDeleteDeck);
-  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation, editingDef, activeTab, expandedEffectCards, expandedTypeGroups, simGameCount, simMaxTurns);
+  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation, editingDef, activeTab, expandedTypeGroups, expandedCards, categoryConfigOpen);
+  // Restore otag search filter after re-render
+  if (otagSearchQuery && activeTab === 'cards') {
+    const input = document.getElementById('cat-otag-search');
+    if (input) input.value = otagSearchQuery;
+    window.__catcfg?.searchOtags(otagSearchQuery);
+  }
 }
 
 // ─── Import Panel ─────────────────────────────────────────────────────────────
@@ -83,13 +165,13 @@ const CORS_PROXY = 'https://corsproxy.io/?url=';
 
 function logEnrichedDeck(deck) {
   const total = deck.cards.reduce((s, c) => s + c.quantity, 0);
-  console.groupCollapsed(`[goldfishery] Enriched deck: "${deck.name}" — ${deck.cards.length} unique / ${total} total`);
+  console.groupCollapsed(`[mullstat] Enriched deck: "${deck.name}" — ${deck.cards.length} unique / ${total} total`);
   console.table(deck.cards.map(c => ({
     name:     c.name,
     qty:      c.quantity,
     types:    c.types?.join(', ') ?? '—',
     cmc:      c.cmc ?? '—',
-    tags:     c.effectTags?.map(t => t.tag).join(', ') || '',
+    tags:     c.effectTags?.map(t => t.subtype).join(', ') || '',
     enriched: c.enriched ?? false,
   })));
   const unenriched = deck.cards.filter(c => !c.enriched);
@@ -132,7 +214,7 @@ function bindImportPanel() {
       // ── URL import path ──────────────────────────────────────────────────
       const publicId = urlMatch[1];
       importBtn.disabled = true;
-      importBtn.textContent = '⏳ Fetching…';
+      importBtn.textContent = '· Fetching…';
 
       try {
         // Append timestamp so corsproxy.io sees a unique URL each import (bypasses proxy cache)
@@ -145,8 +227,8 @@ function bindImportPanel() {
         const mainboardEntries = Object.values(apiData.mainboard || {});
         const { deck, errors } = parseMoxfieldApiResponse(apiData, name);
         const noTypeLine = mainboardEntries.filter(e => !e.card?.type_line);
-        if (noTypeLine.length) console.warn('[goldfishery] Moxfield entries with missing type_line:', noTypeLine.map(e => e.card?.name));
-        console.log(`[goldfishery] Moxfield: parsed ${deck.cards.length} unique cards (${mainboardEntries.reduce((s, e) => s + (e.quantity || 1), 0)} total)`);
+        if (noTypeLine.length) console.warn('[mullstat] Moxfield entries with missing type_line:', noTypeLine.map(e => e.card?.name));
+        console.log(`[mullstat] Moxfield: parsed ${deck.cards.length} unique cards (${mainboardEntries.reduce((s, e) => s + (e.quantity || 1), 0)} total)`);
 
         errors.forEach(e => showToast(e, 'warn'));
 
@@ -156,11 +238,11 @@ function bindImportPanel() {
         }
 
         // Enrich with Scryfall data
-        importBtn.textContent = '⏳ Enriching…';
+        importBtn.textContent = '· Enriching…';
         setImportLoading(true, 'Fetching card data from Scryfall…');
         let deckToSave = deck;
         try {
-          deckToSave = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg));
+          deckToSave = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg), msg => showToast(msg, 'warn'));
         } catch (enrichErr) {
           showToast(`Scryfall enrichment failed: ${enrichErr.message}`, 'warn');
         }
@@ -193,10 +275,10 @@ function bindImportPanel() {
 
       // Enrich with Scryfall data
       importBtn.disabled = true;
-      importBtn.textContent = '⏳ Enriching…';
+      importBtn.textContent = '· Enriching…';
       setImportLoading(true, 'Fetching card data from Scryfall…');
       try {
-        const enriched = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg));
+        const enriched = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg), msg => showToast(msg, 'warn'));
         setImportLoading(false);
 
         logEnrichedDeck(enriched);
@@ -226,7 +308,7 @@ function bindImportPanel() {
 function handleSelectDeck(deckId) {
   activeDeckId = deckId;
   editingDef = null;
-  activeTab = 'overview';
+  activeTab = 'dashboard';
 
   document.querySelectorAll('.deck-card').forEach(el => {
     el.classList.toggle('deck-card--active', el.dataset.deckId === deckId);
@@ -239,13 +321,13 @@ function handleDeleteDeck(deckId) {
   const deck = getDeckById(deckId);
   if (!deck) return;
 
-  if (!confirm(`Remove "${deck.name}"?`)) return;
-
-  removeDeck(deckId);
-  if (activeDeckId === deckId) activeDeckId = null;
-
-  showToast(`Removed "${deck.name}"`, 'info');
-  refresh();
+  showConfirmModal(`Remove "<strong>${deck.name}</strong>"? This cannot be undone.`, () => {
+    removeDeck(deckId);
+    if (activeDeckId === deckId) activeDeckId = null;
+    showToast(`Removed "${deck.name}"`, 'info');
+    refresh();
+  }, { title: 'Remove Deck', confirmLabel: 'Remove', danger: true });
+  return;
 }
 
 // ─── Good Hand Definition Actions ────────────────────────────────────────────
@@ -291,9 +373,11 @@ window.__ghh = {
 
   removeDef(defId) {
     const deck = getDeckById(activeDeckId);
-    if (!deck || !confirm('Remove this good hand definition?')) return;
-    removeGoodHandDef(deck.id, defId);
-    refresh();
+    if (!deck) return;
+    showConfirmModal('Remove this good hand definition?', () => {
+      removeGoodHandDef(deck.id, defId);
+      refresh();
+    }, { title: 'Remove Definition', confirmLabel: 'Remove', danger: true });
   },
 
   saveDef() {
@@ -416,6 +500,29 @@ window.__ghh = {
     }
     window.__hands.show(samples);
   },
+
+  /** Drag-to-reorder good hand defs (priority ordering for mulligan evaluation). */
+  _dragSrc: null,
+
+  dragStart(idx) {
+    this._dragSrc = idx;
+  },
+
+  drop(targetIdx) {
+    if (this._dragSrc === null || this._dragSrc === targetIdx) {
+      this._dragSrc = null;
+      return;
+    }
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.goodHandDefs) return;
+    const defs = [...deck.goodHandDefs];
+    const [moved] = defs.splice(this._dragSrc, 1);
+    defs.splice(targetIdx, 0, moved);
+    // Direct mutation — getDeckById returns the live appState reference
+    deck.goodHandDefs = defs;
+    this._dragSrc = null;
+    refresh();
+  },
 };
 
 // ─── Discard Priority Actions ─────────────────────────────────────────────────
@@ -470,177 +577,30 @@ window.__disc = {
   },
 };
 
-// ─── Cast Priority Rule Actions ───────────────────────────────────────────────
 
-window.__cpr = {
-  _dragSrc: null,
+// ─── Category Actions ─────────────────────────────────────────────────────────
 
-  add() {
-    const deck = getDeckById(activeDeckId);
-    if (!deck) return;
-    if (!Array.isArray(deck.castPriorityRules)) deck.castPriorityRules = [];
-    deck.castPriorityRules.push({
-      id: generateId(), match: 'named',
-      cardName: '', cardType: 'Land', cardSubtype: '', effectCategory: 'draw',
-    });
-    updateDeckCastPriorityRules(deck.id, deck.castPriorityRules);
-    refresh();
-  },
-
-  remove(idx) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck) return;
-    deck.castPriorityRules = (deck.castPriorityRules || []).filter((_, i) => i !== idx);
-    updateDeckCastPriorityRules(deck.id, deck.castPriorityRules);
-    refresh();
-  },
-
-  /** Changing match type re-renders the target widget, so refresh is needed. */
-  setMatch(idx, match) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck?.castPriorityRules?.[idx]) return;
-    deck.castPriorityRules[idx].match = match;
-    updateDeckCastPriorityRules(deck.id, deck.castPriorityRules);
-    refresh();
-  },
-
-  /** Direct field mutation — no refresh needed (inputs are live). */
-  setField(idx, key, val) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck?.castPriorityRules?.[idx]) return;
-    deck.castPriorityRules[idx][key] = val;
-  },
-
-  /** Pick a named card from the single-select dropdown; refresh closes the panel. */
-  pickCard(idx, name) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck?.castPriorityRules?.[idx]) return;
-    deck.castPriorityRules[idx].cardName = name;
-    updateDeckCastPriorityRules(deck.id, deck.castPriorityRules);
-    window.__preview?.hide();
-    refresh();
-  },
-
-  dragStart(idx) {
-    this._dragSrc = idx;
-  },
-
-  drop(targetIdx) {
-    if (this._dragSrc === null || this._dragSrc === targetIdx) {
-      this._dragSrc = null;
-      return;
+window.__cat = {
+  /** Add a canonical category to a card. */
+  add(cardName, category) {
+    if (!category) return;
+    const card = getCardByName(cardName);
+    if (!card) return;
+    if (!Array.isArray(card.categories)) card.categories = [];
+    if (!card.categories.includes(category)) {
+      card.categories.push(category);
+      refresh();
     }
-    const deck = getDeckById(activeDeckId);
-    if (!deck?.castPriorityRules) return;
-    const rules = [...deck.castPriorityRules];
-    const [moved] = rules.splice(this._dragSrc, 1);
-    rules.splice(targetIdx, 0, moved);
-    updateDeckCastPriorityRules(deck.id, rules);
-    this._dragSrc = null;
+  },
+
+  /** Remove a canonical category from a card. */
+  remove(cardName, category) {
+    const card = getCardByName(cardName);
+    if (!card?.categories) return;
+    card.categories = card.categories.filter(c => c !== category);
     refresh();
   },
 };
-
-// ─── Tutor Priority Rule Actions ──────────────────────────────────────────────
-
-window.__tpr = {
-  _dragSrc: null,
-
-  add() {
-    const deck = getDeckById(activeDeckId);
-    if (!deck) return;
-    if (!Array.isArray(deck.tutorPriorityRules)) deck.tutorPriorityRules = [];
-    deck.tutorPriorityRules.push({
-      id: generateId(), target: 'named',
-      cardName: '', cardType: 'Land', cardSubtype: '', effectCategory: 'draw',
-      requireNotInHand: false,
-    });
-    updateDeckTutorPriorityRules(deck.id, deck.tutorPriorityRules);
-    refresh();
-  },
-
-  remove(idx) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck) return;
-    deck.tutorPriorityRules = (deck.tutorPriorityRules || []).filter((_, i) => i !== idx);
-    updateDeckTutorPriorityRules(deck.id, deck.tutorPriorityRules);
-    refresh();
-  },
-
-  /** Changing target type re-renders the target widget. */
-  setTarget(idx, target) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck?.tutorPriorityRules?.[idx]) return;
-    deck.tutorPriorityRules[idx].target = target;
-    updateDeckTutorPriorityRules(deck.id, deck.tutorPriorityRules);
-    refresh();
-  },
-
-  /** Direct field mutation — no refresh needed for live inputs. */
-  setField(idx, key, val) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck?.tutorPriorityRules?.[idx]) return;
-    deck.tutorPriorityRules[idx][key] = val;
-  },
-
-  /** Pick a named card from the single-select dropdown. */
-  pickCard(idx, name) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck?.tutorPriorityRules?.[idx]) return;
-    deck.tutorPriorityRules[idx].cardName = name;
-    updateDeckTutorPriorityRules(deck.id, deck.tutorPriorityRules);
-    window.__preview?.hide();
-    refresh();
-  },
-
-  dragStart(idx) {
-    this._dragSrc = idx;
-  },
-
-  drop(targetIdx) {
-    if (this._dragSrc === null || this._dragSrc === targetIdx) {
-      this._dragSrc = null;
-      return;
-    }
-    const deck = getDeckById(activeDeckId);
-    if (!deck?.tutorPriorityRules) return;
-    const rules = [...deck.tutorPriorityRules];
-    const [moved] = rules.splice(this._dragSrc, 1);
-    rules.splice(targetIdx, 0, moved);
-    updateDeckTutorPriorityRules(deck.id, rules);
-    this._dragSrc = null;
-    refresh();
-  },
-};
-
-// ─── X Spell Value Actions ────────────────────────────────────────────────────
-
-window.__xcosts = {
-  set(cardName, value) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck) return;
-    updateDeckXCost(deck.id, cardName, Math.max(0, Math.floor(value) || 0));
-    // No refresh — input is live
-  },
-};
-
-// ─── Opponent Profile Actions ─────────────────────────────────────────────────
-
-window.__opp = {
-  set(field, value) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck) return;
-    if (!deck.strategyConfig) deck.strategyConfig = {};
-    const min = field === 'numOpponents' ? 1 : 0;
-    deck.strategyConfig[field] = Math.max(min, Math.floor(value) || min);
-    // No refresh — input is live
-  },
-};
-
-// ─── Effect Tag Editor Actions ────────────────────────────────────────────────
-//
-// Exposed on window.__eff so onclick= attributes in effect editor templates can
-// reach them without circular imports. All mutating actions call refresh().
 
 /** Find the card object in the active deck by name. */
 function getCardByName(cardName) {
@@ -648,182 +608,22 @@ function getCardByName(cardName) {
   return deck?.cards.find(c => c.name === cardName) ?? null;
 }
 
-window.__eff = {
+// ─── Category Value Actions ───────────────────────────────────────────────────
 
-  /** Toggle the effect editor open/closed for a card row. Only one open at a time. */
-  toggle(cardName) {
-    const wasOpen = expandedEffectCards.has(cardName);
-    expandedEffectCards.clear();
-    if (!wasOpen) expandedEffectCards.add(cardName);
-    window.__preview?.setLocked(expandedEffectCards.size > 0);
-    refresh();
-  },
-
-  /**
-   * Create a user override for an auto-detected tag.
-   * The override inherits the auto tag's detected values as a starting point.
-   * In the simulator, the auto tag is skipped when a user tag exists for the
-   * same (subtype, timing) pair.
-   */
-  override(cardName, subtype, timing) {
+window.__catval = {
+  /** Set the numeric value for a value-bearing category on a card (no refresh needed). */
+  set(cardName, category, value) {
     const card = getCardByName(cardName);
     if (!card) return;
-    const autoTag = card.effectTags.find(
-      t => t.source === 'auto' && t.subtype === subtype && t.timing === timing
-    );
-    if (!autoTag) return;
-    // Guard: don't create a duplicate override
-    const alreadyOverridden = card.effectTags.some(
-      t => t.source === 'user' && t.subtype === subtype && t.timing === timing
-    );
-    if (alreadyOverridden) return;
-
-    const typeInfo = EFFECT_TYPES[subtype];
-    // Copy all typed field values from the auto tag so the override starts accurate.
-    const autoFieldValues = {};
-    for (const f of (typeInfo?.fields ?? [])) {
-      if (autoTag[f.key] !== undefined) autoFieldValues[f.key] = autoTag[f.key];
+    card.categoryValues = card.categoryValues ?? {};
+    card.categoryValues[category] = Number(value);
+    // Also sync to the matching effectTag so pill labels update
+    const subtype = CATEGORY_TAG_SUBTYPE[category];
+    if (subtype && card.effectTags) {
+      const tag = card.effectTags.find(t => t.subtype === subtype);
+      if (tag) tag.value = Number(value);
     }
-    card.effectTags.push({
-      category:      autoTag.category,
-      subtype:       autoTag.subtype,
-      timing:        autoTag.timing,
-      condition:     autoTag.condition ?? null,
-      tier:          autoTag.tier,
-      source:        'user',
-      triggerFilter: autoTag.triggerFilter ?? null,
-      ...(typeInfo?.defaultValues() ?? {}),
-      ...autoFieldValues,
-    });
-    refresh();
   },
-
-  /**
-   * Add a new user effect tag. Picks the first (subtype, timing) pair not
-   * already covered by an auto-detected tag so there's no immediate conflict.
-   */
-  add(cardName) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    card.effectTags = card.effectTags || [];
-
-    // Each card gets at most one tag per subtype — hide the entire subtype if any
-    // tag (auto or user) already uses it.
-    const coveredSubtypes = new Set(card.effectTags.map(t => t.subtype));
-    const chosenType = EFFECT_TYPE_OPTIONS.find(et => !coveredSubtypes.has(et.id));
-
-    if (!chosenType) {
-      showToast('Every effect type is already on this card. Use Override to customise auto-detected ones.', 'warn');
-      return;
-    }
-
-    const chosenTiming = chosenType.validTimings[0];
-
-    card.effectTags.push({
-      category:      chosenType.category,
-      subtype:       chosenType.id,
-      timing:        chosenTiming,
-      condition:     null,
-      tier:          chosenType.defaultTier,
-      source:        'user',
-      ...chosenType.defaultValues(),
-    });
-    refresh();
-  },
-
-  /** Remove a user tag by its index in card.effectTags. */
-  remove(cardName, tagIdx) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    const tag = card.effectTags[tagIdx];
-    if (!tag || tag.source !== 'user') return;
-    card.effectTags.splice(tagIdx, 1);
-    refresh();
-  },
-
-  /** Update a single field on a user tag. Re-renders only when needed. */
-  setField(cardName, tagIdx, fieldKey, value) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    const tag = card.effectTags[tagIdx];
-    if (!tag || tag.source !== 'user') return;
-    tag[fieldKey] = value;
-  },
-
-  /**
-   * Change the subtype of a user addition tag.
-   * Picks the first uncovered timing for the new subtype.
-   * Only applies to addition tags (not overrides — their subtype is fixed).
-   */
-  setSubtype(cardName, tagIdx, subtypeId) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    const tag = card.effectTags[tagIdx];
-    if (!tag || tag.source !== 'user') return;
-
-    const typeInfo = EFFECT_TYPES[subtypeId];
-    if (!typeInfo) return;
-
-    // Block if any tag (auto or user) already uses this subtype — one per card.
-    const coveredSubtypes = new Set(
-      card.effectTags.filter((_, i) => i !== tagIdx).map(t => t.subtype)
-    );
-    if (coveredSubtypes.has(subtypeId)) return; // UI should already prevent this
-
-    const availableTiming = typeInfo.validTimings[0];
-
-    card.effectTags[tagIdx] = {
-      category:      typeInfo.category,
-      subtype:       subtypeId,
-      timing:        availableTiming,
-      condition:     null,
-      expectedValue: null,
-      tier:          typeInfo.defaultTier,
-      source:        'user',
-      ...typeInfo.defaultValues(),
-    };
-    refresh();
-  },
-
-  /** Change the timing of a user addition tag. Re-renders to show/hide trigger filter widgets. */
-  setTiming(cardName, tagIdx, timing) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    const tag = card.effectTags[tagIdx];
-    if (!tag || tag.source !== 'user') return;
-    tag.timing = timing;
-    refresh();
-  },
-
-  /** Toggle tier for a conditional user tag. Re-renders to show/hide EV input. */
-  setTier(cardName, tagIdx, tier) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    const tag = card.effectTags[tagIdx];
-    if (!tag || tag.source !== 'user') return;
-    tag.tier = tier;
-    refresh();
-  },
-
-  /** Set the cast spell-type filter on a user tag. */
-  setCastFilter(cardName, tagIdx, key) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    const tag = card.effectTags[tagIdx];
-    if (!tag || tag.source !== 'user') return;
-    tag.triggerFilter = resolveCastFilter(key);
-  },
-
-  /** Set the death subject filter on a user tag. */
-  setDeathSubject(cardName, tagIdx, key) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    const tag = card.effectTags[tagIdx];
-    if (!tag || tag.source !== 'user') return;
-    if (!tag.triggerFilter) tag.triggerFilter = {};
-    tag.triggerFilter.deathSubject = key;
-  },
-
 };
 
 // ─── Card Image Preview ───────────────────────────────────────────────────────
@@ -883,21 +683,240 @@ window.__tab = function(tab) {
 
 // ─── Overview Type Group Toggle ───────────────────────────────────────────────
 
-// ─── Simulate Tab Settings ────────────────────────────────────────────────────
-
-window.__sim = {
-  setGameCount(v) { simGameCount = parseInt(v, 10); },
-  setMaxTurns(v)  { simMaxTurns  = parseInt(v, 10); },
-};
 
 window.__ovr = {
+  // Exclusive accordion: open one section at a time; clicking the open one closes it.
   toggle(type) {
-    if (expandedTypeGroups.has(type)) {
-      expandedTypeGroups.delete(type);
-    } else {
-      expandedTypeGroups.add(type);
-    }
+    const wasOpen = expandedTypeGroups.has(type);
+    expandedTypeGroups.clear();
+    if (!wasOpen) expandedTypeGroups.add(type);
     refresh();
+  },
+  toggleCard(cardName) {
+    const wasOpen = expandedCards.has(cardName);
+    expandedCards.clear();
+    if (!wasOpen) expandedCards.add(cardName);
+    refresh();
+  },
+};
+
+// ─── Card Otag Actions ────────────────────────────────────────────────────────
+
+window.__cardotag = {
+  /** Remove an otag slug from a specific card's otag list and re-derive categories. */
+  remove(cardName, slug) {
+    const card = getCardByName(cardName);
+    if (!card) return;
+    card.otags = (card.otags || []).filter(s => s !== slug);
+    card.categories = mapTagsToCategories(card.otags, card.keywords ?? [], card.oracleText);
+    refresh();
+  },
+
+  /** Add an otag slug to a specific card's otag list and re-derive categories. */
+  add(cardName, slug) {
+    const card = getCardByName(cardName);
+    if (!card || !slug) return;
+    if (!Array.isArray(card.otags)) card.otags = [];
+    if (!card.otags.includes(slug)) {
+      card.otags.push(slug);
+      card.categories = mapTagsToCategories(card.otags, card.keywords ?? [], card.oracleText);
+      refresh();
+    }
+  },
+
+  /** Map an unmapped otag slug to a category globally, then refresh. */
+  mapGlobal(slug, catName) {
+    if (!slug || !catName) return;
+    window.__catcfg.addOtagDirect(slug, catName);
+  },
+};
+
+// ─── Category Config ──────────────────────────────────────────────────────────
+
+window.__catcfg = {
+  /** Called by the <details ontoggle> to persist open state across refresh(). */
+  _setOpen(val) { categoryConfigOpen = val; },
+
+  _dragSlug: null,
+  _menuEl: null,
+
+  addCategory() {
+    const nameEl  = document.getElementById('new-cat-name');
+    const colorEl = document.getElementById('new-cat-color');
+    if (!nameEl?.value.trim()) return;
+    addCategory(nameEl.value.trim(), colorEl?.value || '#94a3b8');
+    nameEl.value = '';
+    categoryConfigOpen = true; // keep the editor open after adding
+    refresh();
+  },
+  removeCategory(name) {
+    showConfirmModal(`Remove category "<strong>${name}</strong>"? This will unassign it from all cards.`, () => {
+      removeCategory(name);
+      rederiveAllCardCategories();
+      refresh();
+    }, { title: 'Remove Category', confirmLabel: 'Remove', danger: true });
+  },
+  rename(oldName, newName) {
+    if (newName && newName !== oldName) { renameCategory(oldName, newName); refresh(); }
+  },
+  setColor(name, color) { setCategoryColor(name, color); refresh(); },
+  addOtag() {
+    const slugEl = document.getElementById('new-otag-slug');
+    const catEl  = document.getElementById('new-otag-cat');
+    if (!slugEl?.value.trim() || !catEl?.value) return;
+    setOtagMapping(slugEl.value.trim(), catEl.value);
+    rederiveAllCardCategories();
+    slugEl.value = '';
+    categoryConfigOpen = true; // keep the editor open after adding
+    refresh();
+  },
+  setOtag(slug, catName) { setOtagMapping(slug, catName || null); rederiveAllCardCategories(); refresh(); },
+  removeOtag(slug) { removeOtagMapping(slug); rederiveAllCardCategories(); refresh(); },
+  addOtagDirect(slug, catName) { setOtagMapping(slug, catName); rederiveAllCardCategories(); categoryConfigOpen = true; refresh(); },
+  reset() {
+    showConfirmModal('Reset all category config to defaults? This cannot be undone.', () => {
+      resetCategoryConfig();
+      rederiveAllCardCategories();
+      refresh();
+    }, { title: 'Reset Config', confirmLabel: 'Reset', danger: true });
+  },
+
+  otagDragStart(event, slug) {
+    this._dragSlug = slug;
+    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
+  },
+
+  otagDrop(event, catName) {
+    event.preventDefault();
+    // Clear ALL drag-over highlights
+    document.querySelectorAll('.cat-column.drag-over').forEach(el => el.classList.remove('drag-over'));
+    const slug = this._dragSlug;
+    this._dragSlug = null;
+    if (!slug || !catName) return;
+    setOtagMapping(slug, catName);
+    rederiveAllCardCategories();
+    categoryConfigOpen = true;
+    refresh();
+  },
+
+  showOtagMenu(event, slug, currentCat) {
+    event.stopPropagation();
+    this._closeMenu();
+    const cats = getEffectiveCategoryNames();
+
+    const menu = document.createElement('div');
+    menu.className = 'otag-context-menu';
+
+    // Category options
+    for (const cat of cats) {
+      const item = document.createElement('div');
+      item.className = 'otag-context-item' + (cat === currentCat ? ' otag-context-item--active' : '');
+      item.textContent = (cat === currentCat ? '✓ ' : '') + cat;
+      item.addEventListener('click', () => {
+        this._closeMenu();
+        setOtagMapping(slug, cat);
+        rederiveAllCardCategories();
+        categoryConfigOpen = true;
+        refresh();
+      });
+      menu.appendChild(item);
+    }
+
+    if (currentCat) {
+      const sep = document.createElement('div');
+      sep.className = 'otag-context-separator';
+      menu.appendChild(sep);
+
+      const unmap = document.createElement('div');
+      unmap.className = 'otag-context-item otag-context-item--danger';
+      unmap.textContent = 'Unmap';
+      unmap.addEventListener('click', () => {
+        this._closeMenu();
+        removeOtagMapping(slug);
+        rederiveAllCardCategories();
+        categoryConfigOpen = true;
+        refresh();
+      });
+      menu.appendChild(unmap);
+    }
+
+    document.body.appendChild(menu);
+    this._menuEl = menu;
+
+    // Position below the clicked element
+    const rect = event.currentTarget.getBoundingClientRect();
+    const mw = 160;
+    let left = rect.left;
+    if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
+    menu.style.left = left + 'px';
+    menu.style.top = (rect.bottom + 4) + 'px';
+
+    // Close on outside click
+    const close = (e) => {
+      if (!menu.contains(e.target)) {
+        this._closeMenu();
+        document.removeEventListener('click', close, true);
+      }
+    };
+    setTimeout(() => document.addEventListener('click', close, true), 0);
+  },
+
+  _closeMenu() {
+    this._menuEl?.remove();
+    this._menuEl = null;
+  },
+
+  searchOtags(query) {
+    otagSearchQuery = query;
+    const q = query.toLowerCase().trim();
+    document.querySelectorAll('.otag-pill-item').forEach(el => {
+      const slug = el.dataset.slug || el.textContent.trim();
+      el.style.display = (q && !slug.toLowerCase().includes(q)) ? 'none' : '';
+    });
+  },
+
+  exportConfig() {
+    try {
+      const json = exportCategoryConfig();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'mullstat-categories.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Category config exported', 'success');
+    } catch (err) {
+      showToast(`Export failed: ${err.message}`, 'error');
+    }
+  },
+
+  importConfig() {
+    let input = document.getElementById('cat-import-input-cc');
+    if (!input) {
+      input = document.createElement('input');
+      input.type = 'file';
+      input.accept = '.json';
+      input.style.display = 'none';
+      input.id = 'cat-import-input-cc';
+      document.body.appendChild(input);
+      input.addEventListener('change', async (e) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        try {
+          const text = await file.text();
+          importCategoryConfig(text);
+          rederiveAllCardCategories();
+          categoryConfigOpen = true;
+          refresh();
+          showToast('Category config imported', 'success');
+        } catch (err) {
+          showToast(`Import failed: ${err.message}`, 'error');
+        }
+        input.value = '';
+      });
+    }
+    input.click();
   },
 };
 
@@ -965,46 +984,147 @@ window.__deck = {
   rename() {
     const deck = getDeckById(activeDeckId);
     if (!deck) return;
-    const newName = prompt('Rename deck:', deck.name)?.trim();
-    if (newName) {
+    showPromptModal('New deck name:', deck.name, (newName) => {
       renameDeck(deck.id, newName);
       refresh();
-    }
+    }, { title: 'Rename Deck' });
   },
 };
 
 // ─── Simulation ───────────────────────────────────────────────────────────────
 
+const SIM_GAME_COUNT = 100000;
+
 function handleRunSimulation(deckId) {
   const deck = getDeckById(deckId);
   if (!deck) return;
 
-  const gameCount = simGameCount;
-  const maxTurns  = simMaxTurns;
-
   const btn = document.getElementById('run-sim-btn');
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ Simulating…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '· Running…'; }
 
-  // Defer to next tick so the UI updates before the heavy loop
+  // Defer to next tick so the UI updates before the loop
   setTimeout(() => {
     try {
       const goodHandDefs = deck.goodHandDefs || [];
-      const deckWithTurns = { ...deck, strategyConfig: { ...(deck.strategyConfig || {}), maxTurns } };
-      const results = runSimulation(deckWithTurns, gameCount, goodHandDefs);
+      const results = runSimulation(deck, SIM_GAME_COUNT, goodHandDefs);
       results.goodHandDefNames = Object.fromEntries(
         goodHandDefs.map(d => [d.id, d.name])
       );
+      window.__currentSampleHands = results.sampleGoodHands || [];
       addResults(results);
       activeTab = 'results';
       refresh();
-      showToast(`Simulated ${gameCount.toLocaleString()} games`, 'success');
+      showToast(`Simulated ${SIM_GAME_COUNT.toLocaleString()} opening hands`, 'success');
     } catch (err) {
       showToast(`Simulation error: ${err.message}`, 'error');
     } finally {
-      if (btn) { btn.disabled = false; btn.textContent = '▶ Goldfish'; }
+      if (btn) { btn.disabled = false; btn.textContent = '▶ Run Simulation'; }
     }
   }, 20);
 }
+
+// ─── Category Config Save/Load ────────────────────────────────────────────────
+
+function bindCategoryConfig() {
+  document.getElementById('cat-export-btn')?.addEventListener('click', () => {
+    try {
+      const json = exportCategoryConfig();
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'mullstat-categories.json';
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast('Category config exported', 'success');
+    } catch (err) {
+      showToast(`Export failed: ${err.message}`, 'error');
+    }
+  });
+
+  const catImportBtn = document.getElementById('cat-import-btn');
+  const catImportInput = document.getElementById('cat-import-input');
+
+  catImportBtn?.addEventListener('click', () => catImportInput?.click());
+
+  catImportInput?.addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      importCategoryConfig(text);
+      rederiveAllCardCategories();
+      categoryConfigOpen = true;
+      refresh();
+      showToast('Category config imported successfully', 'success');
+    } catch (err) {
+      showToast(`Import failed: ${err.message}`, 'error');
+    }
+    e.target.value = '';
+  });
+}
+
+// ─── Category Cards Popup ─────────────────────────────────────────────────────
+
+window.__dash = {
+  showCategoryCards(catName) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    const TYPE_ORDER = ['Creature','Sorcery','Instant','Artifact','Enchantment','Land','Planeswalker','Battle','MDFC','Other'];
+    const matchingCards = deck.cards.filter(c => (c.categories || []).includes(catName));
+    if (!matchingCards.length) {
+      showToast(`No cards in "${catName}"`, 'info');
+      return;
+    }
+
+    // Sort by primary type (same order as cards tab)
+    matchingCards.sort((a, b) => {
+      const ai = TYPE_ORDER.findIndex(t => a.types?.includes(t));
+      const bi = TYPE_ORDER.findIndex(t => b.types?.includes(t));
+      const order = (ai === -1 ? TYPE_ORDER.length : ai) - (bi === -1 ? TYPE_ORDER.length : bi);
+      return order !== 0 ? order : a.name.localeCompare(b.name);
+    });
+
+    document.querySelector('.cat-cards-modal-overlay')?.remove();
+
+    // Split into columns of max 10 cards each
+    const COL_SIZE = 10;
+    const cols = [];
+    for (let i = 0; i < matchingCards.length; i += COL_SIZE) {
+      cols.push(matchingCards.slice(i, i + COL_SIZE));
+    }
+
+    const colsHTML = cols.map(col => {
+      const rows = col.map(card => {
+        const safeName = card.name.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+        const imgAttr  = card.imageUrl     ? `data-image-url="${card.imageUrl.replace(/"/g, '&quot;')}"` : '';
+        const backAttr = card.backImageUrl ? `data-back-image-url="${card.backImageUrl.replace(/"/g, '&quot;')}"` : '';
+        const qty = card.quantity > 1 ? `<span class="muted" style="font-size:10px">${card.quantity}× </span>` : '';
+        const primaryType = (card.types || []).find(t => TYPE_COLORS[t]) || 'Other';
+        const typeColor = TYPE_COLORS[primaryType] || TYPE_COLORS.Other;
+        const typeChip = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${typeColor};margin-right:4px;flex-shrink:0"></span>`;
+        return `<div class="card-row card-row--clickable" style="padding:4px 8px"
+          ${imgAttr} ${backAttr}
+          onmouseenter="window.__preview?.show(this.dataset.imageUrl,this.dataset.backImageUrl)"
+          onmouseleave="window.__preview?.hide()">${typeChip}${qty}<span class="card-row-name">${safeName}</span></div>`;
+      }).join('');
+      return `<div class="hand-column">${rows}</div>`;
+    }).join('');
+
+    const overlay = document.createElement('div');
+    overlay.className = 'cat-cards-modal-overlay hands-modal-overlay';
+    overlay.innerHTML = `
+      <div class="hands-modal" style="max-width:800px">
+        <div class="hands-modal-header">
+          <span>${catName} (${matchingCards.reduce((s, c) => s + c.quantity, 0)} cards)</span>
+          <button class="btn-icon" onclick="this.closest('.cat-cards-modal-overlay').remove()">✕</button>
+        </div>
+        <div class="hands-modal-body" style="flex-wrap:wrap">${colsHTML}</div>
+      </div>`;
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  },
+};
 
 // ─── Save / Load ──────────────────────────────────────────────────────────────
 

@@ -17,8 +17,12 @@
  * @property {string|null}  manaCost       - e.g. "{2}{B}{B}"
  * @property {string[]|null} keywords      - e.g. ["Flying", "Deathtouch"]
  * @property {string[]|null} producedMana  - e.g. ["B", "G"]
- * @property {string|null}  scryfallId     - UUID from Scryfall
+ * @property {string|null}  scryfallId     - Printing-specific UUID from Scryfall
+ * @property {string|null}  oracleId       - Oracle-level UUID (same across all printings)
+ * @property {string|null}  set            - Scryfall set code, e.g. 'eld'
+ * @property {string|null}  collectorNumber - Collector number within set, e.g. '10'
  * @property {boolean}      enriched       - true after Scryfall enrichment
+ * @property {string[]}     otags          - Raw Scryfall Tagger oracle-tag slugs
  * @property {EffectTag[]}  effectTags     - Detected/user-overridden effect tags (all faces merged)
  * @property {boolean}      [isMDFC]       - true for modal double-faced cards
  * @property {CardFace[]|null} [faces]     - Per-face data for MDFCs; null for single-faced cards
@@ -72,22 +76,15 @@
 
 /**
  * A structured description of one effect on a card.
- * Built by detectEffectTags() at enrichment time, never recomputed at sim time.
+ * Built by detectEffectTags() at enrichment time.
  *
  * @typedef {Object} EffectTag
- * @property {'draw'|'ramp'|'tutor'|'removal'|'token'|'replacement'|'other'} category
- * @property {string}   subtype        - e.g. 'draw_n', 'loot', 'tutor', 'mana_rock'
- * @property {'etb'|'land_etb'|'creature_etb'|'cast'|'upkeep'|'tap'|'draw_step'|'end_step'|'opponent_cast'|'opponent_draw'|'attack'|'combat_damage'|'sacrifice'|'death'|'on_resolution'|'static'} timing
- * @property {number|null} value       - cards drawn, mana added, etc. null for scaling effects
- * @property {boolean}  isConditional
- * @property {string|null} condition   - human-readable condition description
- * @property {TriggerFilter|null} [triggerFilter] - cast-timing trigger condition; null for self-ETB/upkeep/tap/passive
- * @property {string|null} [counterType]    - for draw_scaling_tap: counter name (e.g. 'burden')
- * @property {number|null} [expectedValue]  - User override: expected sim value for conditional effects (e.g. 2.0 expected draws)
- * @property {FetchConstraint} [fetchType]  - tutor: what the card is allowed to search for
- * @property {'hand'|'battlefield'|'top_of_library'} [putWhere]  - tutor: where the fetched card goes
- * @property {'simulatable'|'track_only'|'skip'} tier  - 'simulatable_soon' is a legacy value (treated as track_only)
- * @property {'auto'|'user'} source    - 'auto' = detected by enrichment; 'user' = added via the effect editor
+ * @property {'ramp'|'draw'|'tutor'} category
+ * @property {'mana_rock'|'draw_n'|'tutor'} subtype
+ * @property {number|null} value         - mana produced, cards drawn, etc.
+ * @property {FetchConstraint|null} [fetchType]  - tutor: what the card searches for
+ * @property {'hand'|'battlefield'|'top_of_library'} [putWhere]  - tutor: destination
+ * @property {'auto'|'user'} source      - 'auto' = enrichment; 'user' = effect editor
  */
 
 /**
@@ -254,23 +251,20 @@
  * // Future: userPreferences{}, sharedProfiles[]
  */
 
-export const CURRENT_SAVE_VERSION = "2.0";
+export const CURRENT_SAVE_VERSION = "3.0";
 
 /** Default StrategyConfig — merged with any deck-level config before simulating. */
 export const DEFAULT_STRATEGY_CONFIG = {
-  castPriority: ['ramp', 'draw', 'tutor', 'creature', 'enchantment', 'artifact', 'sorcery', 'instant', 'other'],
-  landPriority: 'any',
-  maxTurns: 10,
-  preferLowCMC: true,
-  castCommanderWhenAble: false,
-  // Opponent simulation profile — used to fire opponent_draw / opponent_cast triggered abilities.
-  // Baseline: each opponent draws 1 card/turn. numOpponents sets how many opponents.
-  // opponentExtraDrawsPerRound: additional draws on top of the baseline (e.g. wheels, Rhystic Study opponents).
-  numOpponents: 3,
-  opponentExtraDrawsPerRound: 0,
-  opponentCreatureSpellsPerRound: 0,
-  opponentNoncreatureSpellsPerRound: 0,
+  bottomPriorities: [],  // Ordered rules for what to put back when mulliganing
 };
+
+/**
+ * Canonical functional categories used for mulligan analysis.
+ * Aligned with the Archidekt/Command Zone template vocabulary.
+ */
+export const CANONICAL_CATEGORIES = [
+  'Ramp', 'Mana Rock', 'Mana Dork', 'Card Draw', 'Interaction', 'Board Wipe', 'Tutor', 'Mill', 'Cascade', 'Discover',
+];
 
 /** Card types we recognize and display (order matters for UI) */
 export const CARD_TYPES = [

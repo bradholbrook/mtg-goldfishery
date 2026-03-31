@@ -156,13 +156,13 @@ export function loadFromFile(file) {
 function mergeLoadedData(data) {
   const warnings = [];
 
-  if (!data.version) {
+  const fileVersion = data.version ?? null;
+  if (!fileVersion) {
     warnings.push('Save file has no version field — it may be from an older format.');
   }
 
-  if (data.version && data.version !== CURRENT_SAVE_VERSION) {
-    warnings.push(`Save file version ${data.version} differs from current ${CURRENT_SAVE_VERSION}. Loading anyway.`);
-  }
+  // Versions < 3.0 get a silent migration (no user-facing warning for normal upgrades)
+  const isOldVersion = fileVersion && fileVersion !== CURRENT_SAVE_VERSION;
 
   let decksLoaded = 0;
   let resultsLoaded = 0;
@@ -170,17 +170,30 @@ function mergeLoadedData(data) {
   if (Array.isArray(data.decks)) {
     for (const deck of data.decks) {
       if (deck && deck.id && deck.cards) {
-        // Migrate: auto-detected opponent_cast/draw draw tags that previously saved as
-        // track_only (before the simulatable fix) should now be simulatable when the
-        // detection criteria are met (concrete, non-conditional value ≥ 1).
-        for (const card of deck.cards) {
-          for (const tag of (card.effectTags ?? [])) {
-            if (tag.source !== 'auto') continue;
-            if (tag.category !== 'draw') continue;
-            if (!['opponent_cast', 'opponent_draw'].includes(tag.timing)) continue;
-            if (!tag.isConditional && tag.value != null && tag.value >= 1) {
-              tag.tier = 'simulatable';
-            }
+        // v2→v3 migration: remove tier from effect tags (tier system dropped in v3).
+        // Tags are preserved; tier field is simply dropped. The category system in
+        // Phase 2 will replace tier-based classification.
+        if (isOldVersion) {
+          for (const card of deck.cards) {
+            // Strip effectTags down to the minimal shape; keep only mana_rock/mana_dork/draw_n
+            card.effectTags = (card.effectTags ?? [])
+              .filter(tag => ['mana_rock', 'mana_dork', 'draw_n'].includes(tag.subtype))
+              .map(tag => ({
+                category: tag.category,
+                subtype:  tag.subtype,
+                value:    tag.value ?? null,
+                source:   tag.source ?? 'auto',
+              }));
+            card.categories    = card.categories    ?? [];
+            card.categoryValues = card.categoryValues ?? {};
+          }
+          // Drop sim-only config that no longer applies
+          delete deck.castPriorityRules;
+          delete deck.tutorPriorityRules;
+          delete deck.xCosts;
+          if (deck.strategyConfig) {
+            deck.discardPriorities = deck.discardPriorities ?? deck.strategyConfig.discardPriorities ?? [];
+            delete deck.strategyConfig;
           }
         }
         addDeck(deck);
@@ -233,24 +246,13 @@ export function removeGoodHandDef(deckId, defId) {
   deck.goodHandDefs = deck.goodHandDefs.filter(d => d.id !== defId);
 }
 
-// ─── X Costs ──────────────────────────────────────────────────────────────────
+// ─── Results Management (additional) ─────────────────────────────────────────
 
-/**
- * Merge an individual X cost update into the deck's xCosts map.
- * Pass value=null to remove an entry.
- */
-export function updateDeckXCost(deckId, cardName, value) {
-  const deck = appState.decks.find(d => d.id === deckId);
-  if (!deck) return;
-  if (!deck.xCosts) deck.xCosts = {};
-  if (value === null || value === undefined) {
-    delete deck.xCosts[cardName];
-  } else {
-    deck.xCosts[cardName] = value;
-  }
+export function clearResultsForDeck(deckId) {
+  appState.results = appState.results.filter(r => r.deckId !== deckId);
 }
 
-// ─── Discard Priorities ───────────────────────────────────────────────────────
+// ─── Bottom Selection Priorities ─────────────────────────────────────────────
 
 /**
  * Replace the full discardPriorities array on a deck.
@@ -261,28 +263,6 @@ export function updateDeckDiscardPriorities(deckId, priorities) {
   deck.discardPriorities = priorities;
 }
 
-// ─── Cast Priority Rules ──────────────────────────────────────────────────────
-
-/**
- * Replace the full castPriorityRules array on a deck.
- */
-export function updateDeckCastPriorityRules(deckId, rules) {
-  const deck = appState.decks.find(d => d.id === deckId);
-  if (!deck) return;
-  deck.castPriorityRules = rules;
-}
-
-// ─── Tutor Priority Rules ─────────────────────────────────────────────────────
-
-/**
- * Replace the full tutorPriorityRules array on a deck.
- */
-export function updateDeckTutorPriorityRules(deckId, rules) {
-  const deck = appState.decks.find(d => d.id === deckId);
-  if (!deck) return;
-  deck.tutorPriorityRules = rules;
-}
-
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
 function formatDateForFilename(date) {
@@ -291,15 +271,15 @@ function formatDateForFilename(date) {
 
 /**
  * Build a save filename that includes deck names and a timestamp.
- * e.g. "mtg-goldfish-raffine-reanimator-2026-02-21-1430.json"
+ * e.g. "mullstat-raffine-reanimator-2026-02-21-1430.json"
  */
 function buildSaveFilename(decks) {
   const stamp = formatDateForFilename(new Date());
-  if (!decks.length) return `mtg-goldfish-${stamp}.json`;
+  if (!decks.length) return `mullstat-${stamp}.json`;
   const nameSlug = decks
     .slice(0, 3)
     .map(d => d.name.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 20))
     .filter(Boolean)
     .join('_');
-  return `mtg-goldfish-${nameSlug || 'decks'}-${stamp}.json`;
+  return `mullstat-${nameSlug || 'decks'}-${stamp}.json`;
 }

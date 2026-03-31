@@ -1,0 +1,6 @@
+name = "mullstat-tagger"
+main = "index.js"
+compatibility_date = "2024-01-01"
+
+# Free plan limits: 100,000 requests/day, 10ms CPU per request
+# Tagger proxy is read-only so no KV/D1/R2 needed

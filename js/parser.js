@@ -227,6 +227,7 @@ export function parseMoxfieldApiResponse(apiData, nameOverride = '') {
         quantity: quantity || 1,
         types: ['Unknown'], // Scryfall enrichment will set the real type
         isCommander: !!isCommander,
+        moxfieldScryfallId: card.scryfall_id || null,
       });
     }
   }

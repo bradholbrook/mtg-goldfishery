@@ -10,7 +10,14 @@ export function renderDeckList(onSelectDeck, onDeleteDeck) {
   if (decks.length === 0) {
     container.innerHTML = `
       <div class="empty-state">
-        <span class="empty-icon">🃏</span>
+        <svg class="empty-icon" viewBox="0 0 40 52" width="36" height="46" xmlns="http://www.w3.org/2000/svg" style="color:var(--text-muted)">
+          <rect x="6" y="2" width="28" height="48" rx="4" fill="currentColor" opacity="0.15"/>
+          <rect x="6" y="2" width="28" height="48" rx="4" fill="none" stroke="currentColor" stroke-width="3"/>
+          <line x1="6" y1="14" x2="13" y2="14" stroke="currentColor" stroke-width="2.5"/>
+          <line x1="6" y1="24" x2="16" y2="24" stroke="currentColor" stroke-width="2.5"/>
+          <line x1="6" y1="34" x2="13" y2="34" stroke="currentColor" stroke-width="2.5"/>
+          <line x1="6" y1="44" x2="16" y2="44" stroke="currentColor" stroke-width="2.5"/>
+        </svg>
         <p>No decks yet.</p>
         <p class="muted">Paste a Moxfield decklist to get started.</p>
       </div>`;
@@ -32,7 +39,6 @@ export function renderDeckList(onSelectDeck, onDeleteDeck) {
         </div>
         <div class="deck-card-meta">
           ${deck.commander ? `<span class="tag tag-commander">${escapeHtml(deck.commander)}</span>` : ''}
-          <span class="tag">${total} cards</span>
         </div>
         <div class="deck-card-footer muted">${lastRun}</div>
       </div>`;
