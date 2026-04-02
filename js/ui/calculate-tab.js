@@ -46,24 +46,58 @@ function countManaSymbols(str) {
 
 /**
  * Parse how much mana a ramp card produces per activation from its oracle text.
- * Covers tap abilities, rituals, and "add one mana" phrasing.
+ * Covers tap abilities, rituals, variable-output dorks, and "add one mana" phrasing.
+ *
+ * @param {import('../types.js').Card} card
+ * @param {{ commanderColorCount?: number }} [opts]
  */
-function getManaValue(card) {
+function getManaValue(card, { commanderColorCount = 0 } = {}) {
   const oracle = card.oracleText ?? '';
+  // Strip reminder text for cleaner matching
+  const clean = oracle.replace(/\([^)]*\)/g, ' ').replace(/\s+/g, ' ').trim();
 
-  // Tap ability: {T}: Add {C}{C}
-  const tapMatch = oracle.match(/\{T\}[^.]*?:\s*Add\s*((?:\{[^}]+\}\s*)+)/i);
+  // Tap ability with concrete symbols: {T}: Add {C}{C}
+  const tapMatch = clean.match(/\{T\}[^.]*?:\s*Add\s*((?:\{[^}]+\}\s*)+)/i);
   if (tapMatch) return countManaSymbols(tapMatch[1]);
 
+  // ── Variable mana producers (must come before "add one mana" fallback) ────
+
+  // "for each color among permanents you control, add one mana of that color"
+  // e.g. Bloom Tender, Faeburrow Elder
+  // Estimate: by the turn you'd tap this for your commander, ~60% of identity colors in play
+  if (/for each color among permanents you control/i.test(clean)) {
+    return Math.max(1, Math.min(3, commanderColorCount));
+  }
+
+  // "{T}: Add X mana of any one color, where X is the number of [type]"
+  // e.g. Sanctum Weaver, Serra's Sanctum (lands excluded by caller)
+  if (/add (?:\w+ )?mana.*(?:where X is|equal to) the number of/i.test(clean)) {
+    return 3; // conservative board-state estimate
+  }
+
+  // "Add {C} for each [type] you control" / "{T}: Add {G} for each creature"
+  // e.g. Gaea's Cradle (land, excluded), Priest of Titania, Circle of Dreams Druid
+  if (/\badd\b[^.]*\{[^}]+\}[^.]*\bfor each\b/i.test(clean)) {
+    return 3; // conservative board-state estimate
+  }
+
+  // "add an amount of mana of that color equal to your devotion"
+  // e.g. Nykthos (land, excluded by caller); creature variants possible
+  if (/\badd an amount of mana\b/i.test(clean)) {
+    return 3;
+  }
+
+  // ── Concrete non-tap patterns ─────────────────────────────────────────────
+
   // Ritual / burst: "Add {B}{B}{B}." — no tap cost
-  const addMatch = oracle.match(/\bAdd\s+((?:\{[^}]+\}\s*)+)/i);
+  const addMatch = clean.match(/\bAdd\s+((?:\{[^}]+\}\s*)+)/i);
   if (addMatch) return countManaSymbols(addMatch[1]);
 
   // "Add one mana of any color"
-  if (/\badd one mana\b/i.test(oracle)) return 1;
+  if (/\badd one mana\b/i.test(clean)) return 1;
 
-  // "Add mana equal to…" — approximate
-  if (/\badd.*mana equal to\b/i.test(oracle)) return 2;
+  // "Add mana equal to…" — approximate (catch-all for remaining "equal to" patterns)
+  if (/\badd.*mana equal to\b/i.test(clean)) return 2;
 
   return 1; // fallback
 }
@@ -79,35 +113,52 @@ function isDork(card) {
 }
 
 /**
- * P(can cast a ramp card by its own CMC turn) based on colored pip availability.
- * Colorless cards always return 1.0. Uses independence approximation per pip.
+ * P(can cast a ramp card by its own CMC turn) based on colored pip availability
+ * AND total mana availability for expensive ramp (CMC ≥ 3).
+ *
+ * Colorless cards with CMC ≤ 2 return 1.0 (nearly always castable on curve).
+ * For CMC ≥ 3, multiplies by P(≥cmc mana sources by turn cmc) to capture
+ * the chance you simply don't have enough mana to deploy expensive ramp.
  */
-function cardCastability(card, N, colorSources) {
-  const pipColors = parsePipColors(card.manaCost);
-  if (pipColors.length === 0) return 1.0;
+function cardCastability(card, N, colorSources, landCount) {
   const cmc = card.cmc ?? 0;
-  const n = 7 + cmc; // cards in hand on the turn you'd cast it (draw on T1)
-  return pipColors.reduce((p, color) => {
+  const n = 7 + cmc; // cards in hand on the turn you'd cast it
+
+  // Color castability
+  const pipColors = parsePipColors(card.manaCost);
+  let pColor = pipColors.reduce((p, color) => {
     const sources = colorSources[color] ?? 0;
     return p * hypgeomAtLeast(1, N, sources, n);
   }, 1.0);
+
+  // Mana-availability castability for expensive ramp (CMC ≥ 3)
+  // For cheap ramp (CMC 0–2), P(enough lands) is ~95%+ and not worth penalizing
+  if (cmc >= 3 && landCount > 0) {
+    const pMana = hypgeomAtLeast(cmc, N, landCount, n);
+    pColor *= pMana;
+  }
+
+  return pColor;
 }
 
 /**
  * Group ramp cards into CMC×type buckets.
- * Tracks weighted-average mana value AND castability (color availability) per bucket.
+ * Tracks weighted-average mana value AND castability (color + mana availability) per bucket.
+ *
  * @param {import('../types.js').Card[]} rampCards
  * @param {number} N
  * @param {Object} colorSources
+ * @param {number} landCount
+ * @param {number} commanderColorCount - number of colors in commander's cost
  */
-function buildRampBuckets(rampCards, N, colorSources) {
+function buildRampBuckets(rampCards, N, colorSources, landCount, commanderColorCount) {
   const map = new Map(); // `${cmc}_d|r` → { cmc, count, totalValue, totalCastability, isDork }
   for (const card of rampCards) {
     const cmc   = card.cmc ?? 0;
     const dork  = isDork(card);
     const key   = `${cmc}_${dork ? 'd' : 'r'}`;
-    const val   = getManaValue(card);
-    const cast  = cardCastability(card, N, colorSources);
+    const val   = getManaValue(card, { commanderColorCount });
+    const cast  = cardCastability(card, N, colorSources, landCount);
     if (map.has(key)) {
       const b = map.get(key);
       b.totalValue       += val  * card.quantity;
@@ -163,6 +214,7 @@ export function extractDeckProfile(deck) {
   const lands           = nonCmdr.filter(c => c.types?.includes('Land'));
   const landCount       = lands.reduce((s, c) => s + c.quantity, 0);
   const tappedLandCount = lands.filter(c => c.etbTapped).reduce((s, c) => s + c.quantity, 0);
+  const untappedLandCount = landCount - tappedLandCount;
 
   // Color sources must be computed before ramp buckets (castability depends on them)
   const colorSources = { W: 0, U: 0, B: 0, R: 0, G: 0 };
@@ -173,16 +225,18 @@ export function extractDeckProfile(deck) {
     }
   }
 
-  const rampCards   = nonCmdr.filter(c => !c.types?.includes('Land') && isRamp(c));
-  const rampBuckets = buildRampBuckets(rampCards, N, colorSources);
-  const rampCount   = rampCards.reduce((s, c) => s + c.quantity, 0);
-
   const commanderCmc    = commander?.cmc ?? 0;
   const commanderColors = parsePipColors(commander?.manaCost);
 
+  const rampCards   = nonCmdr.filter(c => !c.types?.includes('Land') && isRamp(c));
+  const rampBuckets = buildRampBuckets(rampCards, N, colorSources, landCount, commanderColors.length);
+  const rampCount   = rampCards.reduce((s, c) => s + c.quantity, 0);
+
   return {
     N, commander, commanderCmc, commanderColors,
-    landCount, rampCount, rampBuckets, tappedLandCount, colorSources,
+    landCount, untappedLandCount, tappedLandCount,
+    rampCount, rampBuckets, colorSources,
+    nonCmdrCards: nonCmdr,  // needed for inclusion-exclusion color calc
     tagsStatus: deck.tagsStatus ?? 'ready',
   };
 }
@@ -211,26 +265,111 @@ function parsePipColors(manaCost) {
   return [...seen];
 }
 
+// ─── Tapped Land Mana Helper ─────────────────────────────────────────────────
+
+/**
+ * Effective mana from lands on turn T, given u untapped and t tapped lands drawn.
+ *
+ * Optimal play: play tapped lands on early turns (T1, T2, …) so they untap,
+ * save untapped lands for the curve turn (turn T) where you need mana immediately.
+ *
+ * - If played < T: all lands were played on earlier turns → all produce mana on T.
+ * - If played === T: one land per turn. If we have an untapped land left for turn T,
+ *   all T lands produce mana. If forced to play tapped on T, mana = T − 1.
+ */
+function effectiveLandMana(u, t, T) {
+  const played = Math.min(u + t, T);
+  if (played < T) return played; // all played before T, all untapped by now
+  // played === T: check if we can play an untapped land on turn T
+  const tappedEarly = Math.min(t, T - 1); // tapped lands used on turns 1..T-1
+  const untappedEarly = Math.max(0, (T - 1) - tappedEarly); // untapped filling remaining early slots
+  const untappedLeft = u - untappedEarly; // untapped available for turn T
+  return untappedLeft > 0 ? T : T - 1;
+}
+
+// ─── Inclusion-Exclusion Color Probability ──────────────────────────────────
+
+/**
+ * P(at least 1 source of every required commander color in n draws).
+ *
+ * Uses exact inclusion-exclusion instead of independence approximation.
+ * This correctly handles the positive correlation from dual/tri/5-color lands:
+ * drawing one Command Tower satisfies multiple color requirements simultaneously.
+ *
+ * Formula: P(all colors) = 1 − P(miss ≥ 1 color)
+ * where P(miss ≥ 1) = Σ|S|=1 P(miss S) − Σ|S|=2 P(miss S) + Σ|S|=3 P(miss S) − …
+ * and P(miss S) = C(cards producing none of S, n) / C(N, n)
+ *
+ * @param {string[]} commanderColors - required pip colors (e.g. ['W','U','B','R','G'])
+ * @param {import('../types.js').Card[]} nonCmdrCards - all non-commander cards
+ * @param {number} N - library size
+ * @param {number} n - cards drawn
+ */
+function pAllColors(commanderColors, nonCmdrCards, N, n) {
+  if (commanderColors.length === 0) return 1;
+
+  // Precompute: for each card, which of the required colors does it produce?
+  const cardColorSets = nonCmdrCards.map(card => {
+    const produced = new Set(getProducedColors(card));
+    return { colors: commanderColors.filter(c => produced.has(c)), qty: card.quantity };
+  });
+
+  const numColors = commanderColors.length;
+  const logDenom = logBinom(N, n);
+  let pMissAny = 0;
+
+  // Iterate all non-empty subsets of commanderColors (2^numColors − 1 terms, max 31 for 5c)
+  for (let mask = 1; mask < (1 << numColors); mask++) {
+    // Build the subset of colors for this term
+    const subset = [];
+    for (let i = 0; i < numColors; i++) {
+      if (mask & (1 << i)) subset.push(commanderColors[i]);
+    }
+
+    // Count cards that produce NONE of the colors in this subset
+    let nonProducerCount = 0;
+    for (const { colors, qty } of cardColorSets) {
+      if (!colors.some(c => subset.includes(c))) {
+        nonProducerCount += qty;
+      }
+    }
+
+    // Inclusion-exclusion sign: odd |S| → +, even |S| → −
+    const sign = (subset.length % 2 === 1) ? 1 : -1;
+    const pMissSubset = Math.exp(logBinom(nonProducerCount, n) - logDenom);
+    pMissAny += sign * pMissSubset;
+  }
+
+  return Math.max(0, Math.min(1, 1 - pMissAny));
+}
+
 // ─── Multivariate Hypergeometric Castability ──────────────────────────────────
 
 /**
  * P(can cast commander by turn T).
  *
- * Sums over all winning opening-hand compositions (l lands, r₀ bucket-0 ramp, …, filler)
- * using the multivariate hypergeometric formula, then multiplies by the color factor.
+ * Enumerates all hand compositions (untapped lands, tapped lands, ramp buckets, filler)
+ * using the multivariate hypergeometric formula, then multiplies by exact color probability.
  *
- * Winning condition: min(l, T) + Σ(rᵢ × effectiveValue(bucketᵢ, T)) ≥ commanderCmc
+ * Land model: untapped/tapped split with optimal sequencing — play tapped lands early,
+ * save untapped for curve turn. A tapped land on the curve turn costs 1 effective mana.
+ *
+ * Color model: inclusion-exclusion over all required colors, properly accounting for
+ * dual/tri/5-color lands that satisfy multiple requirements simultaneously.
+ *
+ * Winning condition: effectiveLandMana(u, t, T) + Σ(rᵢ × effectiveValue(bucketᵢ, T)) ≥ commanderCmc
  */
 function pCastOnTurn(T, profile) {
-  const { N, commanderCmc, landCount, rampBuckets, colorSources, commanderColors } = profile;
+  const { N, commanderCmc, untappedLandCount, tappedLandCount, landCount,
+          rampBuckets, commanderColors, nonCmdrCards } = profile;
   if (!commanderCmc || commanderCmc <= 0 || N < 7) return 0;
 
   const n = 7 + T; // opening hand + draw on each of T turns (draw on T1 in Commander)
 
-  // Pre-compute effective values; skip buckets with 0 ev AND cmc > T (can't contribute)
+  // Pre-compute effective values; skip buckets that can't be cast by turn T
   const buckets = rampBuckets
     .map(b => ({ ...b, ev: effectiveValue(b, T) }))
-    .filter(b => b.cmc <= T); // must be castable by turn T to matter
+    .filter(b => b.cmc <= T);
 
   const totalRampInBuckets = buckets.reduce((s, b) => s + b.count, 0);
   const fillerCount = Math.max(0, N - landCount - totalRampInBuckets);
@@ -238,43 +377,44 @@ function pCastOnTurn(T, profile) {
 
   let totalP = 0;
 
-  // Outer loop: number of lands drawn (l)
-  for (let l = 0; l <= Math.min(landCount, n); l++) {
-    const landMana = Math.min(l, T); // can only play T lands across T turns
-    const remaining = n - l;
-    const logLandProb = logBinom(landCount, l);
+  // Outer loops: untapped lands (u) and tapped lands (t)
+  for (let u = 0; u <= Math.min(untappedLandCount, n); u++) {
+    const logU = logBinom(untappedLandCount, u);
+    const nAfterU = n - u;
 
-    // Inner recursion: enumerate (r₀, r₁, …) ramp bucket draws
-    function enumerate(bucketIdx, rem, manaAccum, logProb) {
-      if (bucketIdx === buckets.length) {
-        // All ramp buckets assigned; remainder goes to filler
-        if (rem < 0 || rem > fillerCount) return;
-        if (landMana + manaAccum < commanderCmc) return; // not a winning hand
-        const logP = logProb + logBinom(fillerCount, rem) - logDenom;
-        totalP += Math.exp(logP);
-        return;
+    for (let t = 0; t <= Math.min(tappedLandCount, nAfterU); t++) {
+      const landMana = effectiveLandMana(u, t, T);
+      const remaining = nAfterU - t;
+      const logLandProb = logU + logBinom(tappedLandCount, t);
+
+      // Inner recursion: enumerate ramp bucket draws
+      function enumerate(bucketIdx, rem, manaAccum, logProb) {
+        if (bucketIdx === buckets.length) {
+          if (rem < 0 || rem > fillerCount) return;
+          if (landMana + manaAccum < commanderCmc) return;
+          const logP = logProb + logBinom(fillerCount, rem) - logDenom;
+          totalP += Math.exp(logP);
+          return;
+        }
+
+        const bucket = buckets[bucketIdx];
+        const rMax = Math.min(bucket.count, rem);
+        for (let r = 0; r <= rMax; r++) {
+          enumerate(
+            bucketIdx + 1,
+            rem - r,
+            manaAccum + r * bucket.ev,
+            logProb + logBinom(bucket.count, r),
+          );
+        }
       }
 
-      const bucket = buckets[bucketIdx];
-      const rMax = Math.min(bucket.count, rem);
-      for (let r = 0; r <= rMax; r++) {
-        enumerate(
-          bucketIdx + 1,
-          rem - r,
-          manaAccum + r * bucket.ev,
-          logProb + logBinom(bucket.count, r),
-        );
-      }
+      enumerate(0, remaining, 0, logLandProb);
     }
-
-    enumerate(0, remaining, 0, logLandProb);
   }
 
-  // Color requirement — independence approximation
-  const pColors = commanderColors.reduce((p, c) => {
-    const sources = colorSources[c] ?? 0;
-    return p * hypgeomAtLeast(1, N, sources, n);
-  }, 1);
+  // Color requirement — exact inclusion-exclusion
+  const pColors = pAllColors(commanderColors, nonCmdrCards, N, n);
 
   return Math.min(1, totalP * pColors);
 }
@@ -352,7 +492,8 @@ export function buildCastabilitySection(profile) {
 /** Inner chart + stats HTML, shared between the normal and tag-failed render paths. */
 function buildCastabilityBody(profile) {
   const { commander, commanderCmc, commanderColors, colorSources,
-          N, landCount, rampCount, rampBuckets, tappedLandCount } = profile;
+          N, landCount, untappedLandCount, tappedLandCount,
+          rampCount, rampBuckets, nonCmdrCards } = profile;
 
   // Debug: log ramp buckets and otags
   console.log('[castability] commander:', commander.name, 'CMC:', commanderCmc);
@@ -389,10 +530,14 @@ function buildCastabilityBody(profile) {
       </div>`;
   }).join('');
 
-  // Color source rows
+  // Combined color probability for multi-color commanders (inclusion-exclusion)
+  const n = 7 + commanderCmc;
+  const pColorsExact = pAllColors(commanderColors, nonCmdrCards, N, n);
+
+  // Color source rows — show both per-color independent P and the combined joint P
   const colorRows = commanderColors.map(c => {
     const sources = colorSources[c] ?? 0;
-    const pBy = (hypgeomAtLeast(1, N, sources, 7 + commanderCmc) * 100).toFixed(0);
+    const pBy = (hypgeomAtLeast(1, N, sources, n) * 100).toFixed(0);
     const ok = sources >= 14;
     const color = ok ? 'var(--green)' : sources >= 10 ? 'var(--yellow)' : 'var(--red)';
     return `
@@ -404,9 +549,17 @@ function buildCastabilityBody(profile) {
       </div>`;
   }).join('');
 
+  // Joint color probability line for multi-color commanders
+  const jointColorLine = commanderColors.length >= 2
+    ? `<div class="color-source-row" style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px">
+        <span style="font-size:12px;font-weight:500">All ${commanderColors.length} colors</span>
+        <span class="muted" style="font-size:11px">P(all by T${commanderCmc}): <span style="color:${pColorsExact >= 0.80 ? 'var(--green)' : pColorsExact >= 0.60 ? 'var(--yellow)' : 'var(--red)'}">${(pColorsExact * 100).toFixed(0)}%</span></span>
+      </div>`
+    : '';
+
   const tappedNote = tappedLandCount > 0
     ? `<p class="muted" style="font-size:10px;margin-top:4px">
-        ${tappedLandCount} of ${landCount} lands enter tapped — effective early-turn mana is lower than shown.
+        ${tappedLandCount} of ${landCount} lands enter tapped (modeled: play tapped early, untapped on curve turn).
        </p>`
     : '';
 
@@ -415,16 +568,20 @@ function buildCastabilityBody(profile) {
     ? rampBuckets.map(b => `${b.count}× CMC${b.cmc} ${b.isDork ? 'dork' : 'rock'}(${b.value.toFixed(1)}, ${(b.castability * 100).toFixed(0)}% castable)`).join(', ')
     : 'no ramp detected';
 
+  const landLabel = tappedLandCount > 0
+    ? `${untappedLandCount}+${tappedLandCount} tapped lands`
+    : `${landCount} lands`;
+
   return `
     <span class="cast-threshold-badge cast-threshold-badge--${badgeClass}" style="margin-bottom:6px;display:inline-block">80% by ${badgeText}</span>
     <p class="muted" style="font-size:11px;margin-bottom:8px">
       ${escapeHtml(commander.name)} · CMC ${commanderCmc} ·
-      ${landCount} lands + ${rampCount} ramp · all lands assumed untapped
+      ${landLabel} + ${rampCount} ramp
     </p>
     <p class="muted" style="font-size:10px;margin-bottom:8px">Ramp: ${escapeHtml(bucketSummary)}</p>
     <div class="mc-col-chart" style="height:80px">${bars}</div>
     ${tappedNote}
-    ${commanderColors.length > 0 ? `<div style="margin-top:10px">${colorRows}</div>` : ''}`;
+    ${commanderColors.length > 0 ? `<div style="margin-top:10px">${colorRows}${jointColorLine}</div>` : ''}`;
 }
 
 // ─── Effect Lab: Sub-tab Bar ──────────────────────────────────────────────────
