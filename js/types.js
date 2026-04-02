@@ -23,6 +23,7 @@
  * @property {string|null}  collectorNumber - Collector number within set, e.g. '10'
  * @property {boolean}      enriched       - true after Scryfall enrichment
  * @property {string[]}     otags          - Raw Scryfall Tagger oracle-tag slugs
+ * @property {string[]}     categories     - Canonical categories derived from otags (e.g. 'Ramp', 'Mana Rock')
  * @property {EffectTag[]}  effectTags     - Detected/user-overridden effect tags (all faces merged)
  * @property {boolean}      [isMDFC]       - true for modal double-faced cards
  * @property {CardFace[]|null} [faces]     - Per-face data for MDFCs; null for single-faced cards
@@ -32,6 +33,7 @@
  * @property {string|null}  [toughness]    - Creature toughness
  * @property {string[]}     [supertypes]   - Scryfall supertypes: e.g. ['Basic'] | ['Legendary'] | []
  * @property {string[]}     [subtypes]     - Scryfall subtypes: e.g. ['Forest'] | ['Human','Wizard'] | []
+ * @property {string[]}     [moxTags]      - Moxfield plain-text tags from import (e.g. #ramp, #!staple)
  */
 
 /**
@@ -215,6 +217,16 @@
  * @property {string}      id       - UUID
  * @property {string}      name     - User label, e.g. "Keepable Ramp Hand"
  * @property {Criterion[]} criteria
+ */
+
+/**
+ * An Effect Lab definition — one analysis on the Calculate tab.
+ * @typedef {Object} EffectDef
+ * @property {string}      id         - UUID
+ * @property {string}      name       - User label, e.g. "Scry 3"
+ * @property {number}      lookAtN    - Cards looked at off the top (1..99)
+ * @property {number}      hitTarget  - Desired hits (1..lookAtN)
+ * @property {Criterion[]} criteria   - Evaluated per-card (count forced to 1)
  */
 
 /**

@@ -9,9 +9,13 @@
  * the UI, editor, simulator, and save/load all read from this registry.
  *
  * Field widget types:
- *   'card_select'  → <select> populated with every unique card in the deck
- *   'type_select'  → <select> with CARD_TYPES (Land, Creature, …)
- *   'number'       → <input type="number"> with optional min/max
+ *   'number'           → <input type="number">
+ *   'type_select'      → legacy <select> with CARD_TYPES
+ *   'mv_select'        → legacy <select> for max MV
+ *   'types_multiselect'→ popup multiselect of CARD_TYPES
+ *   'mv_multiselect'   → popup multiselect of MV values (0–6+)
+ *   'cards_multiselect'→ popup multiselect of deck card names
+ *   'tags_multiselect' → popup multiselect of deck moxTags
  */
 
 import { CARD_TYPES } from './types.js';
@@ -19,15 +23,16 @@ import { CARD_TYPES } from './types.js';
 export const CRITERION_TYPES = {
 
   at_least_type: {
+    // Legacy single-type criterion — kept for backward compat with old saves.
+    // Not shown in CRITERION_TYPE_OPTIONS; use at_least_n_of_types instead.
     id:    'at_least_type',
-    label: 'At least N of type',
+    label: 'Card type (legacy)',
     fields: [
-      { key: 'count',    widget: 'number',      label: 'Count', min: 1, max: 7 },
-      { key: 'cardType', widget: 'type_select',  label: 'Type' },
+      { key: 'count',    widget: 'number',     label: 'Count', min: 1, max: 7 },
+      { key: 'cardType', widget: 'type_select', label: 'Type' },
     ],
     defaultValues: () => ({ count: 2, cardType: 'Land' }),
     evaluate(criterion, hand) {
-      // Use types.includes() so MDFCs count toward any of their face types
       const n = hand.filter(c => Array.isArray(c.types) && c.types.includes(criterion.cardType)).length;
       return n >= (Number(criterion.count) || 1);
     },
@@ -37,13 +42,14 @@ export const CRITERION_TYPES = {
   },
 
   at_least_n_of_types: {
+    // Legacy — kept for backward compat. Use types_and_tags instead.
     id:    'at_least_n_of_types',
-    label: 'At least N of any of these types',
+    label: 'Card type(s)',
     fields: [
       { key: 'count',     widget: 'number',           label: 'Count', min: 1, max: 7 },
       { key: 'cardTypes', widget: 'types_multiselect', label: 'Types' },
     ],
-    defaultValues: () => ({ count: 1, cardTypes: ['Creature'] }),
+    defaultValues: () => ({ count: 2, cardTypes: ['Land'] }),
     evaluate(criterion, hand) {
       const types = Array.isArray(criterion.cardTypes) ? criterion.cardTypes : [];
       if (!types.length) return false;
@@ -56,15 +62,49 @@ export const CRITERION_TYPES = {
       const types = Array.isArray(criterion.cardTypes) && criterion.cardTypes.length
         ? criterion.cardTypes.join(' or ')
         : '(no types)';
-      return `≥${criterion.count || 1} of: ${types}`;
+      return `≥${criterion.count || 1} ${types}`;
+    },
+  },
+
+  at_least_types_at_mv: {
+    // Legacy — kept for backward compat. Use types_and_tags_at_mv instead.
+    id:    'at_least_types_at_mv',
+    label: 'Card type(s) at MV',
+    fields: [
+      { key: 'count',     widget: 'number',           label: 'Count', min: 1, max: 7 },
+      { key: 'cardTypes', widget: 'types_multiselect', label: 'Types' },
+      { key: 'mvValues',  widget: 'mv_multiselect',    label: 'MV', prefix: 'at MV' },
+    ],
+    defaultValues: () => ({ count: 1, cardTypes: ['Land'], mvValues: [] }),
+    evaluate(criterion, hand) {
+      const types  = Array.isArray(criterion.cardTypes) ? criterion.cardTypes : [];
+      const mvs    = Array.isArray(criterion.mvValues)  ? criterion.mvValues  : [];
+      if (!types.length) return false;
+      const n = hand.filter(c => {
+        if (!Array.isArray(c.types) || !c.types.some(t => types.includes(t))) return false;
+        if (!mvs.length) return true;
+        return mvs.some(mv => {
+          if (mv === '6+') return c.cmc != null && c.cmc >= 6;
+          return c.cmc != null && c.cmc === Number(mv);
+        });
+      }).length;
+      return n >= (Number(criterion.count) || 1);
+    },
+    describe(criterion) {
+      const types = Array.isArray(criterion.cardTypes) && criterion.cardTypes.length
+        ? criterion.cardTypes.join(' or ') : '(no types)';
+      const mvs = Array.isArray(criterion.mvValues) && criterion.mvValues.length
+        ? ' at MV ' + criterion.mvValues.join('/') : '';
+      return `≥${criterion.count || 1} ${types}${mvs}`;
     },
   },
 
   has_mana_rock: {
+    // Kept for backward compat — not shown in dropdown.
     id:    'has_mana_rock',
     label: 'Has mana rock(s)',
     fields: [
-      { key: 'count', widget: 'number', label: 'Count', min: 1, max: 7 },
+      { key: 'count', widget: 'number',   label: 'Count', min: 1, max: 7 },
       { key: 'maxMv', widget: 'mv_select', label: 'MV' },
     ],
     defaultValues: () => ({ count: 1, maxMv: 'any' }),
@@ -84,9 +124,99 @@ export const CRITERION_TYPES = {
     },
   },
 
+  types_and_tags: {
+    id:    'types_and_tags',
+    label: 'Types/Tags',
+    fields: [
+      { key: 'count',          widget: 'number',                    label: 'Count', min: 1, max: 7 },
+      { key: 'types_and_tags', widget: 'types_and_tags_multiselect' },
+      { key: 'subtypes',       widget: 'subtypes_multiselect' },
+      { key: 'mvValues',       widget: 'mv_multiselect',            label: 'MV', prefix: 'at MV' },
+    ],
+    defaultValues: () => ({ count: 1, cardTypes: [], subtypes: [], tagNames: [], mvValues: [] }),
+    evaluate(criterion, hand) {
+      const types    = Array.isArray(criterion.cardTypes) ? criterion.cardTypes : [];
+      const subtypes = Array.isArray(criterion.subtypes)  ? criterion.subtypes  : [];
+      const tags     = Array.isArray(criterion.tagNames)  ? criterion.tagNames  : [];
+      const mvs      = Array.isArray(criterion.mvValues)  ? criterion.mvValues  : [];
+      // Empty types+tags+subtypes → matches any card; empty mvs → any MV
+      const n = hand.filter(c => {
+        const typeOk    = !types.length    || (Array.isArray(c.types)    && c.types.some(t => types.includes(t)));
+        const subtypeOk = !subtypes.length || (Array.isArray(c.subtypes) && c.subtypes.some(s => subtypes.includes(s)));
+        const tagOk     = !tags.length     || (Array.isArray(c.moxTags)  && c.moxTags.some(t => tags.includes(t)));
+        if (!typeOk || !subtypeOk || !tagOk) return false;
+        if (!mvs.length) return true;
+        return mvs.some(mv => mv === '6+' ? c.cmc != null && c.cmc >= 6 : c.cmc != null && c.cmc === Number(mv));
+      }).length;
+      return n >= (Number(criterion.count) || 1);
+    },
+    describe(criterion) {
+      const types    = Array.isArray(criterion.cardTypes) ? criterion.cardTypes : [];
+      const subtypes = Array.isArray(criterion.subtypes)  ? criterion.subtypes  : [];
+      const tags     = Array.isArray(criterion.tagNames)  ? criterion.tagNames  : [];
+      const mvs      = Array.isArray(criterion.mvValues)  ? criterion.mvValues  : [];
+      const parts = [];
+      if (types.length) {
+        parts.push(subtypes.length ? `${types.join('/')} [${subtypes.join('/')}]` : types.join('/'));
+      } else if (subtypes.length) {
+        parts.push(`[${subtypes.join('/')}]`);
+      }
+      if (tags.length) parts.push(tags.join('/'));
+      const mvStr = mvs.length ? ' @ MV ' + mvs.join('/') : '';
+      return `≥${criterion.count || 1} ${parts.length ? parts.join(' & ') : 'any'}${mvStr}`;
+    },
+  },
+
+  types_and_tags_at_mv: {
+    id:    'types_and_tags_at_mv',
+    label: 'Types/Tags at MV',
+    fields: [
+      { key: 'count',          widget: 'number',                    label: 'Count', min: 1, max: 7 },
+      { key: 'types_and_tags', widget: 'types_and_tags_multiselect' },
+      { key: 'subtypes',       widget: 'subtypes_multiselect' },
+      { key: 'mvValues',       widget: 'mv_multiselect',            label: 'MV', prefix: 'at MV' },
+    ],
+    defaultValues: () => ({ count: 1, cardTypes: [], subtypes: [], tagNames: [], mvValues: [] }),
+    evaluate(criterion, hand) {
+      const types    = Array.isArray(criterion.cardTypes) ? criterion.cardTypes : [];
+      const subtypes = Array.isArray(criterion.subtypes)  ? criterion.subtypes  : [];
+      const tags     = Array.isArray(criterion.tagNames)  ? criterion.tagNames  : [];
+      const mvs      = Array.isArray(criterion.mvValues)  ? criterion.mvValues  : [];
+      if (!types.length && !subtypes.length && !tags.length) return false;
+      const n = hand.filter(c => {
+        const typeOk    = !types.length    || (Array.isArray(c.types)    && c.types.some(t => types.includes(t)));
+        const subtypeOk = !subtypes.length || (Array.isArray(c.subtypes) && c.subtypes.some(s => subtypes.includes(s)));
+        const tagOk     = !tags.length     || (Array.isArray(c.moxTags)  && c.moxTags.some(t => tags.includes(t)));
+        if (!typeOk || !subtypeOk || !tagOk) return false;
+        if (!mvs.length) return true;
+        return mvs.some(mv => {
+          if (mv === '6+') return c.cmc != null && c.cmc >= 6;
+          return c.cmc != null && c.cmc === Number(mv);
+        });
+      }).length;
+      return n >= (Number(criterion.count) || 1);
+    },
+    describe(criterion) {
+      const types    = Array.isArray(criterion.cardTypes) ? criterion.cardTypes : [];
+      const subtypes = Array.isArray(criterion.subtypes)  ? criterion.subtypes  : [];
+      const tags     = Array.isArray(criterion.tagNames)  ? criterion.tagNames  : [];
+      const mvs      = Array.isArray(criterion.mvValues)  ? criterion.mvValues  : [];
+      const parts = [];
+      if (types.length) {
+        parts.push(subtypes.length ? `${types.join('/')} [${subtypes.join('/')}]` : types.join('/'));
+      } else if (subtypes.length) {
+        parts.push(`[${subtypes.join('/')}]`);
+      }
+      if (tags.length) parts.push(tags.join('/'));
+      const label = parts.length ? parts.join(' & ') : '(nothing selected)';
+      const mvStr = mvs.length ? ' at MV ' + mvs.join('/') : '';
+      return `≥${criterion.count || 1} ${label}${mvStr}`;
+    },
+  },
+
   n_of_cards: {
     id:    'n_of_cards',
-    label: 'N of selected cards',
+    label: 'Cards',
     fields: [
       { key: 'count',     widget: 'number',           label: 'Count', min: 1, max: 7 },
       { key: 'cardNames', widget: 'cards_multiselect', label: 'Cards' },
@@ -107,27 +237,38 @@ export const CRITERION_TYPES = {
   },
 
   has_category: {
+    // Legacy — kept for backward compat. Use types_and_tags instead.
     id:    'has_category',
-    label: 'Has card(s) of category',
+    label: 'Tag(s)',
     fields: [
       { key: 'count',    widget: 'number',          label: 'Count', min: 1, max: 7 },
-      { key: 'category', widget: 'category_select', label: 'Category' },
+      { key: 'tagNames', widget: 'tags_multiselect', label: 'Tags' },
     ],
-    defaultValues: () => ({ count: 1, category: 'Ramp' }),
+    defaultValues: () => ({ count: 1, tagNames: [] }),
     evaluate(criterion, hand) {
-      const cat = criterion.category || 'Ramp';
-      const n = hand.filter(c => Array.isArray(c.categories) && c.categories.includes(cat)).length;
+      // Support both new tagNames[] and legacy category string
+      const tags = Array.isArray(criterion.tagNames) && criterion.tagNames.length
+        ? criterion.tagNames
+        : (criterion.category ? [criterion.category] : []);
+      if (!tags.length) return false;
+      const n = hand.filter(c => Array.isArray(c.moxTags) && c.moxTags.some(t => tags.includes(t))).length;
       return n >= (Number(criterion.count) || 1);
     },
     describe(criterion) {
-      return `≥${criterion.count || 1} ${criterion.category || 'Ramp'}`;
+      const tags = Array.isArray(criterion.tagNames) && criterion.tagNames.length
+        ? criterion.tagNames.join(' or ')
+        : (criterion.category || '(none)');
+      return `≥${criterion.count || 1} tagged: ${tags}`;
     },
   },
 
 };
 
-/** Ordered array for populating the type dropdown */
-export const CRITERION_TYPE_OPTIONS = Object.values(CRITERION_TYPES);
+/** Active criterion types shown in the dropdown (legacy types omitted) */
+export const CRITERION_TYPE_OPTIONS = [
+  CRITERION_TYPES.types_and_tags,
+  CRITERION_TYPES.n_of_cards,
+];
 
 /**
  * Evaluate all criteria in a good hand definition against a drawn hand.

@@ -70,6 +70,22 @@ export function removeDeck(deckId) {
   appState.results = appState.results.filter(r => r.deckId !== deckId);
 }
 
+// ─── Effect Def Management ────────────────────────────────────────────────────
+
+export function updateEffectDef(deckId, def) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.effectDefs = deck.effectDefs ?? [];
+  const idx = deck.effectDefs.findIndex(d => d.id === def.id);
+  if (idx >= 0) deck.effectDefs[idx] = def; else deck.effectDefs.push(def);
+}
+
+export function removeEffectDef(deckId, defId) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.effectDefs = (deck.effectDefs ?? []).filter(d => d.id !== defId);
+}
+
 // ─── Results Management ───────────────────────────────────────────────────────
 
 /**
@@ -100,7 +116,10 @@ export function saveToFile() {
   const saveData = {
     version: CURRENT_SAVE_VERSION,
     savedAt: new Date().toISOString(),
-    decks: appState.decks,
+    decks: appState.decks.map(d => {
+      const { _enrichmentMap, ...rest } = d;
+      return rest;
+    }),
     // Strip raw hands array from results (summary is enough for persistence)
     results: appState.results.map(r => ({
       ...r,

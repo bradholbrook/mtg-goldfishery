@@ -238,8 +238,8 @@ function extractEnrichmentFields(scryfallCard) {
       collectorNumber: scryfallCard.collector_number || null,
       enriched: true,
       effectTags,
-      categories: [],
       otags: [],
+      categories: [],
       types,
       isMDFC: true,
       faces,
@@ -283,8 +283,8 @@ function extractEnrichmentFields(scryfallCard) {
     collectorNumber: scryfallCard.collector_number || null,
     enriched: true,
     effectTags,
-    categories: [],
     otags: [],
+    categories: [],
     types,
     supertypes,
     subtypes,
@@ -425,31 +425,7 @@ export async function enrichDeckWithScryfall(deck, onProgress = null, onError = 
     }
   }
 
-  // ── Fetch oracle tags from Cloudflare Worker ──────────────────────────────
-  const seenOracles = new Set();
-  const cardsForTagger = [...enrichmentMap.entries()]
-    .filter(([, f]) => f.enriched && f.oracleId && f.set && f.collectorNumber)
-    .filter(([, f]) => {
-      if (seenOracles.has(f.oracleId)) return false;
-      seenOracles.add(f.oracleId);
-      return true;
-    })
-    .map(([, f]) => ({ oracleId: f.oracleId, set: f.set, collectorNumber: f.collectorNumber }));
-
-  if (cardsForTagger.length > 0) {
-    notify(`Fetching oracle tags for ${cardsForTagger.length} card(s)…`);
-    const { tags: tagMap, failed: tagsFailed } = await fetchOracleTags(cardsForTagger);
-    if (tagsFailed) notifyError('Tag enrichment failed — card categories may be incomplete. If this persists, try again tomorrow.');
-
-    for (const [name, fields] of enrichmentMap) {
-      if (!fields.oracleId) continue;
-      const slugs = tagMap.get(fields.oracleId) ?? [];
-      fields.otags = slugs;
-      fields.categories = mapTagsToCategories(slugs, fields.keywords ?? [], fields.oracleText);
-    }
-  }
-
-  // ── Merge enrichment fields onto card objects ──────────────────────────────
+  // ── Merge enrichment fields onto card objects (no tags yet) ──────────────
   const enrichedCards = deck.cards.map(card => {
     const fields = enrichmentMap.get(card.name);
     if (!fields) return { ...card, effectTags: [], enriched: false };
@@ -464,7 +440,6 @@ export async function enrichDeckWithScryfall(deck, onProgress = null, onError = 
     if (card.moxfieldScryfallId) {
       const id = card.moxfieldScryfallId;
       merged.imageUrl = `https://cards.scryfall.io/normal/front/${id[0]}/${id[1]}/${id}.jpg`;
-      // Back face for DFCs (only if the card actually has a back face)
       if (merged.backImageUrl) {
         merged.backImageUrl = `https://cards.scryfall.io/normal/back/${id[0]}/${id[1]}/${id}.jpg`;
       }
@@ -473,11 +448,79 @@ export async function enrichDeckWithScryfall(deck, onProgress = null, onError = 
     return merged;
   });
 
-  notify('Enrichment complete.');
+  notify('Scryfall enrichment complete.');
 
   return {
     ...deck,
     cards: enrichedCards,
     enriched: true,
+    tagsStatus: 'pending',   // tags not yet fetched — caller must run enrichTagsForDeck()
+    _enrichmentMap: enrichmentMap, // handed off for Phase 2; stripped before saving
+  };
+}
+
+/**
+ * Phase 2 of enrichment: fetch oracle tags from the Cloudflare Worker and patch
+ * card.otags / card.categories onto an already-Scryfall-enriched deck.
+ *
+ * The deck should have been returned by enrichDeckWithScryfall() so that
+ * _enrichmentMap is still attached. Falls back gracefully to a name→oracleId
+ * scan of the cards themselves if _enrichmentMap is missing.
+ *
+ * @param {import('./types.js').DeckConfig} deck  - deck with tagsStatus:'pending'
+ * @param {function} [onProgress]
+ * @param {function} [onError]
+ * @returns {Promise<import('./types.js').DeckConfig>}  deck with tagsStatus:'ready' or 'failed'
+ */
+export async function enrichTagsForDeck(deck, onProgress = null, onError = null) {
+  const notify      = msg => { if (onProgress) onProgress(msg); };
+  const notifyError = msg => { if (onError)    onError(msg); };
+
+  // Rebuild card lookup: name → { oracleId, set, collectorNumber, keywords, oracleText }
+  // Prefer the _enrichmentMap attached during Phase 1 (most accurate); fall back to card fields.
+  const enrichmentMap = deck._enrichmentMap ?? (() => {
+    const m = new Map();
+    for (const card of deck.cards) {
+      if (card.oracleId) m.set(card.name, card);
+    }
+    return m;
+  })();
+
+  const seenOracles   = new Set();
+  const cardsForTagger = [...enrichmentMap.entries()]
+    .filter(([, f]) => f.oracleId && f.set && f.collectorNumber)
+    .filter(([, f]) => {
+      if (seenOracles.has(f.oracleId)) return false;
+      seenOracles.add(f.oracleId);
+      return true;
+    })
+    .map(([, f]) => ({ oracleId: f.oracleId, set: f.set, collectorNumber: f.collectorNumber }));
+
+  if (cardsForTagger.length === 0) {
+    return { ...deck, tagsStatus: 'ready', _enrichmentMap: undefined };
+  }
+
+  notify(`Fetching oracle tags for ${cardsForTagger.length} card(s)…`);
+  const { tags: tagMap, failed } = await fetchOracleTags(cardsForTagger);
+  if (failed) notifyError('Tag enrichment failed — castability analysis uses ramp estimate only.');
+
+  // Patch categories onto each card
+  const patchedCards = deck.cards.map(card => {
+    const oracleId = card.oracleId ?? enrichmentMap.get(card.name)?.oracleId;
+    if (!oracleId) return card;
+    const slugs = tagMap.get(oracleId) ?? [];
+    return {
+      ...card,
+      otags:      slugs,
+      categories: mapTagsToCategories(slugs, card.keywords ?? [], card.oracleText),
+    };
+  });
+
+  notify('Tag enrichment complete.');
+  return {
+    ...deck,
+    cards:        patchedCards,
+    tagsStatus:   failed ? 'failed' : 'ready',
+    _enrichmentMap: undefined,  // release memory
   };
 }

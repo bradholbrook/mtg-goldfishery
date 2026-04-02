@@ -129,10 +129,14 @@ function selectCardsToBottom(hand, n, priorities = []) {
   // Apply priority rules in order
   for (const rule of priorities) {
     if (bottomed.length >= n) break;
-    const { modifier, cardType } = rule;
+    const { modifier, cardType, cardTypes } = rule;
+    // Support both new cardTypes[] and legacy cardType string
+    const typeFilter = Array.isArray(cardTypes)
+      ? cardTypes
+      : (cardType && cardType !== 'Any' ? [cardType] : []);
     let candidates = remaining.filter(c => {
-      if (cardType && cardType !== 'Any') {
-        return Array.isArray(c.types) && c.types.includes(cardType);
+      if (typeFilter.length > 0) {
+        return Array.isArray(c.types) && c.types.some(t => typeFilter.includes(t));
       }
       return true;
     });
@@ -344,6 +348,14 @@ function simulateMulliganGame(flatDeck, defs, priorities, commanderCost) {
     }
   }
 
+  // Count moxTags in final hand
+  const moxTagCounts = {};
+  for (const card of hand) {
+    for (const tag of (card.moxTags ?? [])) {
+      moxTagCounts[tag] = (moxTagCounts[tag] || 0) + 1;
+    }
+  }
+
   // Commander castability simulation
   const castableTurn = commanderCost
     ? simulateCastability(library, hand, commanderCost)
@@ -355,6 +367,7 @@ function simulateMulliganGame(flatDeck, defs, priorities, commanderCost) {
     handSize: hand.length,
     typeCounts,
     categoryCounts,
+    moxTagCounts,
     castableTurn,
   };
 }
@@ -411,9 +424,9 @@ function computeSummary(games, deck, goodHandDefs) {
     ? parseFloat(((goodHandAnyCount / n) * 100).toFixed(1))
     : null;
 
-  // Mulligan depth distribution: % of games kept at each depth
+  // Mulligan depth distribution: % of games kept at each depth (0–7)
   const keepRateByDepth = {};
-  for (let d = 0; d <= 6; d++) {
+  for (let d = 0; d <= 7; d++) {
     const kept = games.filter(g => g.mulligans === d).length;
     keepRateByDepth[d] = parseFloat(((kept / n) * 100).toFixed(1));
   }
@@ -434,6 +447,28 @@ function computeSummary(games, deck, goodHandDefs) {
   for (const cat of CANONICAL_CATEGORIES) {
     const total = games.reduce((s, g) => s + (g.categoryCounts?.[cat] || 0), 0);
     avgCategoryCounts[cat] = parseFloat((total / n).toFixed(2));
+  }
+
+  // MoxTag averages across kept hands
+  const allMoxTags = [...new Set(games.flatMap(g => Object.keys(g.moxTagCounts ?? {})))];
+  const avgMoxTagCounts = {};
+  for (const tag of allMoxTags) {
+    const total = games.reduce((s, g) => s + (g.moxTagCounts?.[tag] || 0), 0);
+    avgMoxTagCounts[tag] = parseFloat((total / n).toFixed(2));
+  }
+
+  // Average type counts in kept hands (from hand cards directly)
+  const typeTotals = {};
+  for (const g of games) {
+    for (const c of g.hand) {
+      for (const t of (c.types || [])) {
+        typeTotals[t] = (typeTotals[t] || 0) + 1;
+      }
+    }
+  }
+  const avgTypeCountsInHand = {};
+  for (const t in typeTotals) {
+    avgTypeCountsInHand[t] = parseFloat((typeTotals[t] / n).toFixed(2));
   }
 
   // Commander castability: P(castable by turn N) for N=1..8
@@ -462,6 +497,8 @@ function computeSummary(games, deck, goodHandDefs) {
     avgHandSize,
     greediness,
     avgCategoryCounts,
+    avgMoxTagCounts,
+    avgTypeCountsInHand,
     castabilityByTurn,
     avgCastableTurn,
   };

@@ -6,30 +6,31 @@
  */
 
 import { parseMoxfieldDecklist, parseMoxfieldApiResponse } from './parser.js';
+import { hypgeomAtLeast } from './hypergeometric.js';
 import { runSimulation, flattenDeck } from './simulator.js';
 import {
   addDeck, removeDeck, addResults,
-  getDeckById, saveToFile, loadFromFile,
+  getDeckById, getResultsForDeck, saveToFile, loadFromFile,
   updateDeckGoodHandDefs, removeGoodHandDef,
   updateDeckDiscardPriorities,
   renameDeck,
   clearResultsForDeck,
+  updateEffectDef, removeEffectDef,
 } from './storage.js';
 import {
   renderDeckList, renderActiveDeck, showToast,
   setImportLoading, TYPE_COLORS,
 } from './ui.js';
 import { generateId } from './types.js';
-import { CRITERION_TYPES, evaluateGoodHandDef } from './criteria.js';
-import { enrichDeckWithScryfall } from './enrichment.js';
-import { mapTagsToCategories } from './tagger.js';
-import { CATEGORY_TAG_SUBTYPE } from './ui/cards-tab.js';
+import { CRITERION_TYPES, CRITERION_TYPE_OPTIONS, evaluateGoodHandDef } from './criteria.js';
+import { enrichDeckWithScryfall, enrichTagsForDeck } from './enrichment.js';
 import {
-  addCategory, removeCategory, renameCategory, setCategoryColor,
-  setOtagMapping, removeOtagMapping, resetCategoryConfig,
-  getEffectiveCategoryNames, getEffectiveOtagMappings,
-  exportCategoryConfig, importCategoryConfig,
-} from './category-config.js';
+  setLabN, setLabTarget,
+  setActiveSubTab, setEffectOpen,
+  matchingCardsForEffect, matchingCardsForCriterion,
+  buildNSensGraph, buildSrcSensGraph,
+} from './ui/calculate-tab.js';
+import { setBottomOpen } from './ui/config-tab.js';
 
 // ─── State ────────────────────────────────────────────────────────────────────
 
@@ -45,17 +46,20 @@ let editingDef = null;
 
 let activeTab = 'dashboard';
 
-/** Type names currently expanded in the Card Tags tab type list. */
+/** Which view to show in the inline results section: 'tags' or 'types'. */
+let resultView = 'tags';
+
+/** Sort order for avg cards in kept hand: 'alpha' or 'value'. */
+let resultSort = 'value';
+
+/** Section labels currently expanded in the card browser accordion. */
 const expandedTypeGroups = new Set();
 
-/** Card names currently expanded in the Card Tags tab detail view. */
-const expandedCards = new Set();
+/** Whether the card browser shows 'types' or 'tags' grouping. */
+let cardBrowserView = 'types';
 
-/** Whether the Category Config <details> panel is open in the Card Tags tab. */
-let categoryConfigOpen = false;
-
-/** Current otag search filter (persisted across refresh so type-group toggle doesn't clear it). */
-let otagSearchQuery = '';
+/** Whether cards are sorted 'alpha' or 'cmc' within each group. */
+let cardBrowserSort = 'alpha';
 
 // ─── Modal Dialogs ────────────────────────────────────────────────────────────
 
@@ -112,46 +116,28 @@ function showPromptModal(message, defaultValue, onConfirm, { title = 'Enter Valu
   setTimeout(() => { input.focus(); input.select(); }, 50);
 }
 
-// ─── Category Helpers ─────────────────────────────────────────────────────────
-
-/** Re-derive categories for every card in the active deck from current otag mappings. */
-function rederiveAllCardCategories() {
-  const deck = getDeckById(activeDeckId);
-  if (!deck) return;
-  const otagMap = getEffectiveOtagMappings();
-  for (const card of deck.cards) {
-    card.categories = mapTagsToCategories(card.otags || [], card.keywords ?? [], card.oracleText, otagMap);
-  }
-  clearResultsForDeck(deck.id);
-}
-
 // ─── Init ─────────────────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
   bindImportPanel();
   bindSaveLoad();
-  bindCategoryConfig();
   refresh();
 
-  // Close card multiselect dropdowns when clicking outside them
+  // Close dropdowns/multiselects when clicking outside them (or into a different one)
   document.addEventListener('click', e => {
-    if (!e.target.closest('.card-multiselect-dropdown')) {
-      document.querySelectorAll('.card-multiselect-dropdown[open]').forEach(el => el.removeAttribute('open'));
-    }
+    document.querySelectorAll('.card-multiselect-dropdown[open], .crit-ms-dropdown[open], .crit-type-dropdown[open]')
+      .forEach(el => { if (!el.contains(e.target)) el.removeAttribute('open'); });
   });
 });
 
 // ─── Refresh (re-render everything from state) ────────────────────────────────
 
 function refresh() {
+  const deck = getDeckById(activeDeckId);
+  const allResults = deck ? getResultsForDeck(deck.id) : [];
+  const latestResults = allResults[allResults.length - 1] || null;
   renderDeckList(handleSelectDeck, handleDeleteDeck);
-  renderActiveDeck(getDeckById(activeDeckId), handleRunSimulation, editingDef, activeTab, expandedTypeGroups, expandedCards, categoryConfigOpen);
-  // Restore otag search filter after re-render
-  if (otagSearchQuery && activeTab === 'cards') {
-    const input = document.getElementById('cat-otag-search');
-    if (input) input.value = otagSearchQuery;
-    window.__catcfg?.searchOtags(otagSearchQuery);
-  }
+  renderActiveDeck(deck, handleRunSimulation, editingDef, activeTab, expandedTypeGroups, cardBrowserView, cardBrowserSort, latestResults, resultView, resultSort);
 }
 
 // ─── Import Panel ─────────────────────────────────────────────────────────────
@@ -162,6 +148,32 @@ const MOXFIELD_URL_RE = /moxfield\.com\/decks\/([\w-]+)/i;
 // corsproxy.io proxies the request server-side and adds CORS headers for us.
 // Swap this constant if a self-hosted proxy is added later.
 const CORS_PROXY = 'https://corsproxy.io/?url=';
+
+/**
+ * Run oracle-tag enrichment for a deck in the background.
+ * Updates the live appState reference directly, then calls refresh().
+ * Safe to call without await — errors are caught and reflected in tagsStatus.
+ */
+async function runTagEnrichment(deckId, deckPhase1) {
+  try {
+    const deckWithTags = await enrichTagsForDeck(
+      deckPhase1,
+      msg => console.log('[tags]', msg),
+      msg => showToast(msg, 'warn'),
+    );
+    const live = getDeckById(deckId);
+    if (!live) return; // deck was removed while tags were loading
+    live.cards      = deckWithTags.cards;
+    live.tagsStatus = deckWithTags.tagsStatus;
+    delete live._enrichmentMap;
+    refresh();
+  } catch (err) {
+    const live = getDeckById(deckId);
+    if (live) { live.tagsStatus = 'failed'; delete live._enrichmentMap; }
+    showToast('Oracle tag fetch timed out or failed — castability unavailable.', 'warn');
+    refresh();
+  }
+}
 
 function logEnrichedDeck(deck) {
   const total = deck.cards.reduce((s, c) => s + c.quantity, 0);
@@ -228,7 +240,13 @@ function bindImportPanel() {
         const { deck, errors } = parseMoxfieldApiResponse(apiData, name);
         const noTypeLine = mainboardEntries.filter(e => !e.card?.type_line);
         if (noTypeLine.length) console.warn('[mullstat] Moxfield entries with missing type_line:', noTypeLine.map(e => e.card?.name));
-        console.log(`[mullstat] Moxfield: parsed ${deck.cards.length} unique cards (${mainboardEntries.reduce((s, e) => s + (e.quantity || 1), 0)} total)`);
+        const taggedCards = deck.cards.filter(c => c.moxTags?.length > 0);
+        console.log(`[mullstat] Moxfield: parsed ${deck.cards.length} unique cards (${mainboardEntries.reduce((s, e) => s + (e.quantity || 1), 0)} total), ${taggedCards.length} with tags`);
+        if (taggedCards.length === 0 && mainboardEntries.length > 0) {
+          // Log a sample entry to inspect the API structure if no tags were found
+          const sample = mainboardEntries.find(e => e.tags?.length) ?? mainboardEntries[0];
+          console.log('[mullstat] Sample mainboard entry (checking for tags field):', sample);
+        }
 
         errors.forEach(e => showToast(e, 'warn'));
 
@@ -237,23 +255,27 @@ function bindImportPanel() {
           return;
         }
 
-        // Enrich with Scryfall data
+        // Phase 1: Scryfall enrichment
         importBtn.textContent = '· Enriching…';
         setImportLoading(true, 'Fetching card data from Scryfall…');
-        let deckToSave = deck;
+        let deckPhase1 = deck;
         try {
-          deckToSave = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg), msg => showToast(msg, 'warn'));
+          deckPhase1 = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg), msg => showToast(msg, 'warn'));
         } catch (enrichErr) {
           showToast(`Scryfall enrichment failed: ${enrichErr.message}`, 'warn');
         }
         setImportLoading(false);
 
-        logEnrichedDeck(deckToSave);
-        addDeck(deckToSave);
-        activeDeckId = deckToSave.id;
+        logEnrichedDeck(deckPhase1);
+        addDeck(deckPhase1);
+        activeDeckId = deckPhase1.id;
         clearImportPanel();
-        showToast(`Imported "${deckToSave.name}" — ${deckToSave.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
+        showToast(`Imported "${deckPhase1.name}" — ${deckPhase1.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
         refresh();
+
+        // Phase 2: oracle tags in background (non-blocking)
+        runTagEnrichment(deckPhase1.id, deckPhase1);
+
       } catch (err) {
         showToast(`Moxfield fetch failed: ${err.message}`, 'error');
         setImportLoading(false);
@@ -273,20 +295,22 @@ function bindImportPanel() {
         return;
       }
 
-      // Enrich with Scryfall data
+      // Phase 1: Scryfall enrichment
       importBtn.disabled = true;
       importBtn.textContent = '· Enriching…';
       setImportLoading(true, 'Fetching card data from Scryfall…');
+      let deckPhase1 = deck;
       try {
-        const enriched = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg), msg => showToast(msg, 'warn'));
+        deckPhase1 = await enrichDeckWithScryfall(deck, msg => setImportLoading(true, msg), msg => showToast(msg, 'warn'));
         setImportLoading(false);
-
-        logEnrichedDeck(enriched);
-        addDeck(enriched);
-        activeDeckId = enriched.id;
+        logEnrichedDeck(deckPhase1);
+        addDeck(deckPhase1);
+        activeDeckId = deckPhase1.id;
         clearImportPanel();
-        showToast(`Imported "${enriched.name}" — ${enriched.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
+        showToast(`Imported "${deckPhase1.name}" — ${deckPhase1.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
         refresh();
+        // Phase 2: oracle tags in background (non-blocking)
+        runTagEnrichment(deckPhase1.id, deckPhase1);
       } catch (err) {
         // Enrichment failure: still import the deck, just without enrichment
         setImportLoading(false);
@@ -309,6 +333,7 @@ function handleSelectDeck(deckId) {
   activeDeckId = deckId;
   editingDef = null;
   activeTab = 'dashboard';
+  expandedTypeGroups.clear();
 
   document.querySelectorAll('.deck-card').forEach(el => {
     el.classList.toggle('deck-card--active', el.dataset.deckId === deckId);
@@ -336,8 +361,89 @@ function handleDeleteDeck(deckId) {
 // can reach them without circular imports or prop-drilling callbacks.
 // All mutating actions call refresh() to re-render from the updated state.
 
+/**
+ * Update a criterion multiselect summary text from DOM order (so it reflects
+ * the canonical list order rather than selection order).
+ */
+const COMBINED_CRIT_TYPES = ['types_and_tags', 'types_and_tags_at_mv'];
+
+function _updateApplicabilityNote() {
+  const el = document.querySelector('.def-editor-applicability');
+  if (!el || !editingDef) return;
+  const min = (editingDef.criteria || []).reduce((sum, c) => sum + (Number(c.count) || 1), 0);
+  let html = '';
+  if (min > 7) {
+    html = `<span class="mull-note mull-note--warn">⚠ needs ${min} cards — can never be satisfied</span>`;
+  } else if (min > 0) {
+    const cls = min <= 4 ? 'mull-note--ok' : min <= 6 ? 'mull-note--mid' : 'mull-note--tight';
+    html = `<span class="mull-note ${cls}">requires ≥${min} cards</span>`;
+  }
+  el.innerHTML = html;
+}
+
+function _updateSubtypeSection(critIdx, criterion) {
+  const details = document.querySelector(`[data-crit-idx="${critIdx}"] details[data-ms-key="subtypes"]`);
+  if (!details) return;
+  const mapJson = details.dataset.subtypeMap;
+  if (!mapJson) return;
+  let typeSubtypeMap;
+  try { typeSubtypeMap = JSON.parse(mapJson); } catch { return; }
+
+  const selectedTypes = Array.isArray(criterion.cardTypes) ? criterion.cardTypes : [];
+  const validSubtypes = selectedTypes.length
+    ? [...new Set(selectedTypes.flatMap(t => typeSubtypeMap[t] || []))].sort()
+    : [...new Set(Object.values(typeSubtypeMap).flat())].sort();
+
+  // Prune selected subtypes that are no longer valid for the new type selection
+  const prev = Array.isArray(criterion.subtypes) ? criterion.subtypes : [];
+  criterion.subtypes = prev.filter(s => validSubtypes.includes(s));
+
+  const list = details.querySelector('.crit-ms-list');
+  if (!list) return;
+  if (!validSubtypes.length) {
+    list.innerHTML = '<div class="ms-empty">No subtypes in deck</div>';
+  } else {
+    list.innerHTML = validSubtypes.map(s => {
+      const checked = criterion.subtypes.includes(s);
+      return `<label class="ms-item${checked ? ' ms-item--checked' : ''}" data-group="subtype">
+        <input type="checkbox" class="ms-checkbox"${checked ? ' checked' : ''}
+          onchange="window.__ghh.toggleSubtype(${critIdx},${JSON.stringify(s).replace(/"/g, '&quot;')})">
+        <span>${s}</span>
+      </label>`;
+    }).join('');
+  }
+
+  const summaryEl = details.querySelector('.crit-ms-toggle');
+  if (summaryEl) summaryEl.textContent = criterion.subtypes.length ? criterion.subtypes.join('/') : '(Any Subtype)';
+}
+
+function _updateCombinedTypeTagSummary(critIdx) {
+  const details = document.querySelector(`[data-crit-idx="${critIdx}"] details[data-ms-type="combined"]`);
+  if (!details) return;
+  const getText = el => el.closest('.ms-item')?.querySelector('span')?.textContent?.trim();
+  const checkedTypes = [...details.querySelectorAll('.ms-item[data-group="type"] input:checked')].map(getText).filter(Boolean);
+  const checkedTags  = [...details.querySelectorAll('.ms-item[data-group="tag"]  input:checked')].map(getText).filter(Boolean);
+  const parts = [];
+  if (checkedTypes.length) parts.push(checkedTypes.join('/'));
+  if (checkedTags.length)  parts.push(checkedTags.join('/'));
+  const summaryEl = details.querySelector('.crit-ms-toggle');
+  if (summaryEl) summaryEl.textContent = parts.length ? parts.join(' & ') : '(Any Card)';
+}
+
+function _updateMsSummary(critIdx, fieldKey, placeholder, fmt = null) {
+  const details = document.querySelector(`[data-crit-idx="${critIdx}"] [data-ms-key="${fieldKey}"]`)?.closest('details');
+  if (!details) return;
+  const checked = [...details.querySelectorAll('.ms-item input:checked')]
+    .map(el => el.closest('.ms-item')?.querySelector('span')?.textContent?.trim())
+    .filter(Boolean);
+  const summaryEl = details.querySelector('.crit-ms-toggle');
+  if (summaryEl) summaryEl.textContent = checked.length
+    ? (fmt ? fmt(checked) : checked.join('/'))
+    : placeholder;
+}
+
 function freshCriterion() {
-  const firstType = Object.values(CRITERION_TYPES)[0];
+  const firstType = CRITERION_TYPE_OPTIONS[0];
   return { type: firstType.id, ...firstType.defaultValues() };
 }
 
@@ -350,7 +456,7 @@ window.__ghh = {
       defId: null,
       name: hasNoDefs ? 'Keepable Hand' : '',
       criteria: hasNoDefs
-        ? [{ type: 'at_least_type', count: 2, cardType: 'Land' }]
+        ? [{ type: 'types_and_tags', count: 3, cardTypes: ['Land'], tagNames: [] }]
         : [freshCriterion()],
     };
     refresh();
@@ -437,33 +543,68 @@ window.__ghh = {
   setVal(idx, key, val) {
     if (!editingDef?.criteria[idx]) return;
     editingDef.criteria[idx][key] = val;
+    if (key === 'count') _updateApplicabilityNote();
   },
 
-  /** Toggle a type in/out of a criterion's cardTypes array and re-render. */
-  toggleType(idx, typeName) {
+  /** Toggle a type in/out of a criterion's cardTypes array (no full re-render). */
+  toggleType(idx, typeName, fieldKey = 'cardTypes') {
     if (!editingDef?.criteria[idx]) return;
-    const current = editingDef.criteria[idx].cardTypes || [];
-    editingDef.criteria[idx].cardTypes = current.includes(typeName)
+    const current = editingDef.criteria[idx][fieldKey] || [];
+    editingDef.criteria[idx][fieldKey] = current.includes(typeName)
       ? current.filter(t => t !== typeName)
       : [...current, typeName];
-    refresh();
+    if (COMBINED_CRIT_TYPES.includes(editingDef.criteria[idx].type)) {
+      _updateSubtypeSection(idx, editingDef.criteria[idx]);
+      _updateCombinedTypeTagSummary(idx);
+    } else {
+      _updateMsSummary(idx, fieldKey, '(Any Card)');
+    }
   },
 
-  /** Toggle a card name in/out of a criterion's cardNames array. */
+  /** Toggle an MV value in/out of a criterion's mvValues array (no full re-render). */
+  toggleMv(idx, mv) {
+    if (!editingDef?.criteria[idx]) return;
+    const current = editingDef.criteria[idx].mvValues || [];
+    editingDef.criteria[idx].mvValues = current.includes(mv)
+      ? current.filter(v => v !== mv)
+      : [...current, mv];
+    _updateMsSummary(idx, 'mvValues', '(Any MV)');
+  },
+
+  /** Toggle a subtype in/out of a criterion's subtypes array (no full re-render). */
+  toggleSubtype(idx, subtype) {
+    if (!editingDef?.criteria[idx]) return;
+    const current = editingDef.criteria[idx].subtypes || [];
+    editingDef.criteria[idx].subtypes = current.includes(subtype)
+      ? current.filter(s => s !== subtype)
+      : [...current, subtype];
+    _updateMsSummary(idx, 'subtypes', '(Any Subtype)');
+  },
+
+  /** Toggle a tag name in/out of a criterion's tagNames array (no full re-render). */
+  toggleTag(idx, tagName) {
+    if (!editingDef?.criteria[idx]) return;
+    const current = editingDef.criteria[idx].tagNames || [];
+    editingDef.criteria[idx].tagNames = current.includes(tagName)
+      ? current.filter(t => t !== tagName)
+      : [...current, tagName];
+    if (COMBINED_CRIT_TYPES.includes(editingDef.criteria[idx].type)) {
+      _updateCombinedTypeTagSummary(idx);
+    } else {
+      _updateMsSummary(idx, 'tagNames', '(Any Card)');
+    }
+  },
+
+  /** Toggle a card name in/out of a criterion's cardNames array (no full re-render). */
   toggleCard(idx, cardName) {
     if (!editingDef?.criteria[idx]) return;
     const current = editingDef.criteria[idx].cardNames || [];
     editingDef.criteria[idx].cardNames = current.includes(cardName)
       ? current.filter(n => n !== cardName)
       : [...current, cardName];
-    // Update the dropdown summary text without a full re-render
-    const count = editingDef.criteria[idx].cardNames.length;
-    const summary = document.querySelector(`[data-crit-idx="${idx}"] .card-multiselect-toggle`);
-    if (summary) {
-      summary.textContent = count > 0
-        ? `${count} card${count !== 1 ? 's' : ''} selected`
-        : 'Select cards…';
-    }
+    _updateMsSummary(idx, 'cardNames', '(Any Card)', (items) =>
+      items.length <= 2 ? items.join(' or ') : `${items.length} cards`
+    );
   },
 
   /** Update the definition name — no re-render needed */
@@ -533,12 +674,15 @@ window.__ghh = {
 window.__disc = {
   _dragSrc: null,
 
+  toggleBottom(v) { setBottomOpen(v); },
+
   add() {
     const deck = getDeckById(activeDeckId);
     if (!deck) return;
     if (!Array.isArray(deck.discardPriorities)) deck.discardPriorities = [];
     deck.discardPriorities.push({ id: generateId(), modifier: 'highest_cmc', cardType: 'Any' });
     updateDeckDiscardPriorities(deck.id, deck.discardPriorities);
+    setBottomOpen(true);
     refresh();
   },
 
@@ -555,6 +699,44 @@ window.__disc = {
     const deck = getDeckById(activeDeckId);
     if (!deck?.discardPriorities?.[idx]) return;
     deck.discardPriorities[idx][key] = val;
+  },
+
+  /** Toggle a card type in/out of a bottom-priority rule's cardTypes array (no re-render). */
+  toggleType(idx, typeName) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.discardPriorities?.[idx]) return;
+    const rule = deck.discardPriorities[idx];
+    // Migrate legacy cardType string → cardTypes array
+    if (!Array.isArray(rule.cardTypes)) {
+      rule.cardTypes = (rule.cardType && rule.cardType !== 'Any') ? [rule.cardType] : [];
+      delete rule.cardType;
+    }
+    rule.cardTypes = rule.cardTypes.includes(typeName)
+      ? rule.cardTypes.filter(t => t !== typeName)
+      : [...rule.cardTypes, typeName];
+    // Update summary from DOM order (canonical)
+    const row = document.querySelector(`[data-disc-idx="${idx}"]`);
+    const checked = [...(row?.querySelectorAll('.crit-ms-list .ms-item input:checked') ?? [])]
+      .map(el => el.closest('.ms-item')?.querySelector('span')?.textContent?.trim())
+      .filter(Boolean);
+    const summaryEl = row?.querySelector('.disc-ms-toggle');
+    if (summaryEl) summaryEl.textContent = checked.length ? checked.join(' or ') : '(any type)';
+  },
+
+  /** Update modifier label inline without full re-render. */
+  setModifier(idx, value) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck?.discardPriorities?.[idx]) return;
+    deck.discardPriorities[idx].modifier = value;
+    // Update the toggle text — read label from the clicked option's text
+    const toggle = document.querySelector(`[data-disc-idx="${idx}"] .crit-type-toggle`);
+    if (toggle) {
+      // Find the now-active option in the DOM
+      const active = document.querySelector(`[data-disc-idx="${idx}"] .crit-type-option.crit-type-option--active`);
+      // The option was updated by changeType's onclick before this fires — but we can derive from value
+      const labels = { highest_cmc: 'Highest CMC', lowest_cmc: 'Lowest CMC', any: 'Any' };
+      toggle.textContent = labels[value] ?? value;
+    }
   },
 
   dragStart(idx) {
@@ -578,53 +760,6 @@ window.__disc = {
 };
 
 
-// ─── Category Actions ─────────────────────────────────────────────────────────
-
-window.__cat = {
-  /** Add a canonical category to a card. */
-  add(cardName, category) {
-    if (!category) return;
-    const card = getCardByName(cardName);
-    if (!card) return;
-    if (!Array.isArray(card.categories)) card.categories = [];
-    if (!card.categories.includes(category)) {
-      card.categories.push(category);
-      refresh();
-    }
-  },
-
-  /** Remove a canonical category from a card. */
-  remove(cardName, category) {
-    const card = getCardByName(cardName);
-    if (!card?.categories) return;
-    card.categories = card.categories.filter(c => c !== category);
-    refresh();
-  },
-};
-
-/** Find the card object in the active deck by name. */
-function getCardByName(cardName) {
-  const deck = getDeckById(activeDeckId);
-  return deck?.cards.find(c => c.name === cardName) ?? null;
-}
-
-// ─── Category Value Actions ───────────────────────────────────────────────────
-
-window.__catval = {
-  /** Set the numeric value for a value-bearing category on a card (no refresh needed). */
-  set(cardName, category, value) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    card.categoryValues = card.categoryValues ?? {};
-    card.categoryValues[category] = Number(value);
-    // Also sync to the matching effectTag so pill labels update
-    const subtype = CATEGORY_TAG_SUBTYPE[category];
-    if (subtype && card.effectTags) {
-      const tag = card.effectTags.find(t => t.subtype === subtype);
-      if (tag) tag.value = Number(value);
-    }
-  },
-};
 
 // ─── Card Image Preview ───────────────────────────────────────────────────────
 
@@ -632,26 +767,82 @@ window.__catval = {
   const _previewEl      = document.getElementById('card-image-preview');
   const _previewImg     = document.getElementById('card-image-preview-img');
   const _previewImgBack = document.getElementById('card-image-preview-img-back');
+  const _previewTags    = document.getElementById('card-image-preview-tags');
+
+  function _renderTags(tags) {
+    if (!_previewTags) return;
+    if (tags && tags.length > 0) {
+      const sorted = [...tags].sort((a, b) => a.localeCompare(b));
+      _previewTags.innerHTML = sorted.map(t =>
+        `<span class="preview-tag-pill">${t.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span>`
+      ).join('');
+      _previewTags.style.display = 'flex';
+    } else {
+      _previewTags.innerHTML = '';
+      _previewTags.style.display = 'none';
+    }
+  }
 
   let _locked = false;
+  let _anchored = false; // true when tags popup is pinned to a pile card
+
+  function _positionAtElement(el, estimatedW = 150) {
+    if (!el || !_previewEl) return;
+    const rect = el.getBoundingClientRect();
+    // Use provided estimate before layout; offsetWidth may be 0 on first paint.
+    const w = _previewEl.offsetWidth || estimatedW;
+    const h = _previewEl.offsetHeight || 100;
+    // Prefer right side of card; flip left if it would overflow
+    let x = rect.right + 6;
+    if (x + w > window.innerWidth - 6) x = rect.left - w - 6;
+    const y = Math.max(6, Math.min(rect.top, window.innerHeight - h - 6));
+    _previewEl.style.left = x + 'px';
+    _previewEl.style.top  = y + 'px';
+  }
+
   window.__preview = {
-    show(imageUrl, backImageUrl) {
+    show(imageUrl, backImageUrl, tags = []) {
       if (_locked || !imageUrl || !_previewEl || !_previewImg) return;
+      _previewImg.style.display = '';
       _previewImg.src = imageUrl;
       if (backImageUrl && _previewImgBack) {
+        _previewImgBack.style.display = '';
         _previewImgBack.src = backImageUrl;
         _previewEl.classList.add('dual');
       } else {
         if (_previewImgBack) _previewImgBack.src = '';
         _previewEl.classList.remove('dual');
       }
-      _previewEl.style.display = backImageUrl ? 'flex' : 'block';
+      _renderTags(tags);
+      _anchored = false;
+      _previewEl.style.display = 'flex';
+    },
+    // anchorEl: when provided, pin the popup to the top-right of that element.
+    showTags(tags = [], anchorEl = null) {
+      if (_locked || !_previewEl) return;
+      // Hide img elements so they don't add width when showing tags only.
+      if (_previewImg) { _previewImg.src = ''; _previewImg.style.display = 'none'; }
+      if (_previewImgBack) { _previewImgBack.src = ''; _previewImgBack.style.display = 'none'; }
+      _previewEl.classList.remove('dual');
+      _renderTags(tags);
+      if (!tags.length) { _previewEl.style.display = 'none'; return; }
+      _previewEl.style.display = 'flex';
+      if (anchorEl) {
+        _anchored = true;
+        _positionAtElement(anchorEl, 160); // tags-only popup ~160px wide
+      } else {
+        _anchored = false;
+      }
     },
     hide() {
       if (_previewEl) {
         _previewEl.style.display = 'none';
         _previewEl.classList.remove('dual');
       }
+      if (_previewImg) _previewImg.style.display = '';
+      if (_previewImgBack) _previewImgBack.style.display = '';
+      if (_previewTags) _previewTags.style.display = 'none';
+      _anchored = false;
     },
     setLocked(val) {
       _locked = val;
@@ -662,8 +853,9 @@ window.__catval = {
     },
   };
 
+  // Follow cursor unless pinned to a pile card.
   document.addEventListener('mousemove', e => {
-    if (!_previewEl || _previewEl.style.display === 'none') return;
+    if (!_previewEl || _previewEl.style.display === 'none' || _anchored) return;
     const w = _previewEl.offsetWidth || 220;
     const h = _previewEl.offsetHeight || 310;
     const x = Math.min(e.clientX + 20, window.innerWidth - w - 10);
@@ -671,6 +863,38 @@ window.__catval = {
     _previewEl.style.left = x + 'px';
     _previewEl.style.top  = y + 'px';
   });
+}
+
+// ─── Card Pile In-Place Expansion ─────────────────────────────────────────────
+// Shows the full card image anchored at the hovered strip's position.
+// pointer-events:none lets mouse events pass through to cards underneath.
+{
+  const _overlay = document.createElement('div');
+  _overlay.id = 'card-pile-overlay';
+  const _overlayImg = document.createElement('img');
+  _overlay.appendChild(_overlayImg);
+  document.body.appendChild(_overlay);
+
+  window.__pileCard = {
+    show(imageUrl, el) {
+      if (!imageUrl || !el) return;
+      const rect = el.getBoundingClientRect();
+      _overlayImg.src = imageUrl;
+      _overlay.style.left  = rect.left + 'px';
+      _overlay.style.top   = rect.top + 'px';
+      _overlay.style.width = rect.width + 'px';
+      _overlay.style.display = 'block';
+    },
+    hide() {
+      _overlay.style.display = 'none';
+    },
+  };
+
+  // Dismiss on scroll so the fixed overlay doesn't drift from the card.
+  document.addEventListener('scroll', () => {
+    window.__pileCard.hide();
+    window.__preview?.hide();
+  }, { capture: true, passive: true });
 }
 
 // ─── Tab Navigation ───────────────────────────────────────────────────────────
@@ -681,244 +905,38 @@ window.__tab = function(tab) {
   refresh();
 };
 
+// ─── Results View Toggle ──────────────────────────────────────────────────────
+
+window.__res = {
+  setView(v) { resultView = v; refresh(); },
+  setSort(s) { resultSort = s; refresh(); },
+};
+
 // ─── Overview Type Group Toggle ───────────────────────────────────────────────
 
 
 window.__ovr = {
   // Exclusive accordion: open one section at a time; clicking the open one closes it.
-  toggle(type) {
-    const wasOpen = expandedTypeGroups.has(type);
+  toggle(label) {
+    const wasOpen = expandedTypeGroups.has(label);
     expandedTypeGroups.clear();
-    if (!wasOpen) expandedTypeGroups.add(type);
+    if (!wasOpen) expandedTypeGroups.add(label);
     refresh();
   },
-  toggleCard(cardName) {
-    const wasOpen = expandedCards.has(cardName);
-    expandedCards.clear();
-    if (!wasOpen) expandedCards.add(cardName);
+  // Switch between 'types' and 'tags' grouping in the card browser.
+  setView(view) {
+    cardBrowserView = view;
+    expandedTypeGroups.clear();
+    refresh();
+  },
+  // Switch card sort order within groups.
+  setSort(sort) {
+    cardBrowserSort = sort;
     refresh();
   },
 };
 
-// ─── Card Otag Actions ────────────────────────────────────────────────────────
 
-window.__cardotag = {
-  /** Remove an otag slug from a specific card's otag list and re-derive categories. */
-  remove(cardName, slug) {
-    const card = getCardByName(cardName);
-    if (!card) return;
-    card.otags = (card.otags || []).filter(s => s !== slug);
-    card.categories = mapTagsToCategories(card.otags, card.keywords ?? [], card.oracleText);
-    refresh();
-  },
-
-  /** Add an otag slug to a specific card's otag list and re-derive categories. */
-  add(cardName, slug) {
-    const card = getCardByName(cardName);
-    if (!card || !slug) return;
-    if (!Array.isArray(card.otags)) card.otags = [];
-    if (!card.otags.includes(slug)) {
-      card.otags.push(slug);
-      card.categories = mapTagsToCategories(card.otags, card.keywords ?? [], card.oracleText);
-      refresh();
-    }
-  },
-
-  /** Map an unmapped otag slug to a category globally, then refresh. */
-  mapGlobal(slug, catName) {
-    if (!slug || !catName) return;
-    window.__catcfg.addOtagDirect(slug, catName);
-  },
-};
-
-// ─── Category Config ──────────────────────────────────────────────────────────
-
-window.__catcfg = {
-  /** Called by the <details ontoggle> to persist open state across refresh(). */
-  _setOpen(val) { categoryConfigOpen = val; },
-
-  _dragSlug: null,
-  _menuEl: null,
-
-  addCategory() {
-    const nameEl  = document.getElementById('new-cat-name');
-    const colorEl = document.getElementById('new-cat-color');
-    if (!nameEl?.value.trim()) return;
-    addCategory(nameEl.value.trim(), colorEl?.value || '#94a3b8');
-    nameEl.value = '';
-    categoryConfigOpen = true; // keep the editor open after adding
-    refresh();
-  },
-  removeCategory(name) {
-    showConfirmModal(`Remove category "<strong>${name}</strong>"? This will unassign it from all cards.`, () => {
-      removeCategory(name);
-      rederiveAllCardCategories();
-      refresh();
-    }, { title: 'Remove Category', confirmLabel: 'Remove', danger: true });
-  },
-  rename(oldName, newName) {
-    if (newName && newName !== oldName) { renameCategory(oldName, newName); refresh(); }
-  },
-  setColor(name, color) { setCategoryColor(name, color); refresh(); },
-  addOtag() {
-    const slugEl = document.getElementById('new-otag-slug');
-    const catEl  = document.getElementById('new-otag-cat');
-    if (!slugEl?.value.trim() || !catEl?.value) return;
-    setOtagMapping(slugEl.value.trim(), catEl.value);
-    rederiveAllCardCategories();
-    slugEl.value = '';
-    categoryConfigOpen = true; // keep the editor open after adding
-    refresh();
-  },
-  setOtag(slug, catName) { setOtagMapping(slug, catName || null); rederiveAllCardCategories(); refresh(); },
-  removeOtag(slug) { removeOtagMapping(slug); rederiveAllCardCategories(); refresh(); },
-  addOtagDirect(slug, catName) { setOtagMapping(slug, catName); rederiveAllCardCategories(); categoryConfigOpen = true; refresh(); },
-  reset() {
-    showConfirmModal('Reset all category config to defaults? This cannot be undone.', () => {
-      resetCategoryConfig();
-      rederiveAllCardCategories();
-      refresh();
-    }, { title: 'Reset Config', confirmLabel: 'Reset', danger: true });
-  },
-
-  otagDragStart(event, slug) {
-    this._dragSlug = slug;
-    if (event.dataTransfer) event.dataTransfer.effectAllowed = 'move';
-  },
-
-  otagDrop(event, catName) {
-    event.preventDefault();
-    // Clear ALL drag-over highlights
-    document.querySelectorAll('.cat-column.drag-over').forEach(el => el.classList.remove('drag-over'));
-    const slug = this._dragSlug;
-    this._dragSlug = null;
-    if (!slug || !catName) return;
-    setOtagMapping(slug, catName);
-    rederiveAllCardCategories();
-    categoryConfigOpen = true;
-    refresh();
-  },
-
-  showOtagMenu(event, slug, currentCat) {
-    event.stopPropagation();
-    this._closeMenu();
-    const cats = getEffectiveCategoryNames();
-
-    const menu = document.createElement('div');
-    menu.className = 'otag-context-menu';
-
-    // Category options
-    for (const cat of cats) {
-      const item = document.createElement('div');
-      item.className = 'otag-context-item' + (cat === currentCat ? ' otag-context-item--active' : '');
-      item.textContent = (cat === currentCat ? '✓ ' : '') + cat;
-      item.addEventListener('click', () => {
-        this._closeMenu();
-        setOtagMapping(slug, cat);
-        rederiveAllCardCategories();
-        categoryConfigOpen = true;
-        refresh();
-      });
-      menu.appendChild(item);
-    }
-
-    if (currentCat) {
-      const sep = document.createElement('div');
-      sep.className = 'otag-context-separator';
-      menu.appendChild(sep);
-
-      const unmap = document.createElement('div');
-      unmap.className = 'otag-context-item otag-context-item--danger';
-      unmap.textContent = 'Unmap';
-      unmap.addEventListener('click', () => {
-        this._closeMenu();
-        removeOtagMapping(slug);
-        rederiveAllCardCategories();
-        categoryConfigOpen = true;
-        refresh();
-      });
-      menu.appendChild(unmap);
-    }
-
-    document.body.appendChild(menu);
-    this._menuEl = menu;
-
-    // Position below the clicked element
-    const rect = event.currentTarget.getBoundingClientRect();
-    const mw = 160;
-    let left = rect.left;
-    if (left + mw > window.innerWidth - 8) left = window.innerWidth - mw - 8;
-    menu.style.left = left + 'px';
-    menu.style.top = (rect.bottom + 4) + 'px';
-
-    // Close on outside click
-    const close = (e) => {
-      if (!menu.contains(e.target)) {
-        this._closeMenu();
-        document.removeEventListener('click', close, true);
-      }
-    };
-    setTimeout(() => document.addEventListener('click', close, true), 0);
-  },
-
-  _closeMenu() {
-    this._menuEl?.remove();
-    this._menuEl = null;
-  },
-
-  searchOtags(query) {
-    otagSearchQuery = query;
-    const q = query.toLowerCase().trim();
-    document.querySelectorAll('.otag-pill-item').forEach(el => {
-      const slug = el.dataset.slug || el.textContent.trim();
-      el.style.display = (q && !slug.toLowerCase().includes(q)) ? 'none' : '';
-    });
-  },
-
-  exportConfig() {
-    try {
-      const json = exportCategoryConfig();
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'mullstat-categories.json';
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast('Category config exported', 'success');
-    } catch (err) {
-      showToast(`Export failed: ${err.message}`, 'error');
-    }
-  },
-
-  importConfig() {
-    let input = document.getElementById('cat-import-input-cc');
-    if (!input) {
-      input = document.createElement('input');
-      input.type = 'file';
-      input.accept = '.json';
-      input.style.display = 'none';
-      input.id = 'cat-import-input-cc';
-      document.body.appendChild(input);
-      input.addEventListener('change', async (e) => {
-        const file = e.target.files?.[0];
-        if (!file) return;
-        try {
-          const text = await file.text();
-          importCategoryConfig(text);
-          rederiveAllCardCategories();
-          categoryConfigOpen = true;
-          refresh();
-          showToast('Category config imported', 'success');
-        } catch (err) {
-          showToast(`Import failed: ${err.message}`, 'error');
-        }
-        input.value = '';
-      });
-    }
-    input.click();
-  },
-};
 
 // ─── Sample Good Hands Popup ──────────────────────────────────────────────────
 
@@ -980,6 +998,311 @@ window.__hands = {
 
 // ─── Deck Rename ──────────────────────────────────────────────────────────────
 
+// ─── Calculate Tab ────────────────────────────────────────────────────────────
+
+/** Show a card-list popup modal (type-sorted, with hover preview). */
+function showCardListModal(title, cards) {
+  document.querySelector('.calc-card-modal-overlay')?.remove();
+  if (!cards.length) return;
+
+  const HAND_TYPE_PRIORITY_CALC = ['Land', 'Creature', 'Instant', 'Sorcery', 'Artifact', 'Enchantment', 'Planeswalker', 'Battle', 'MDFC', 'Other'];
+
+  // Group by primary type
+  const groups = {};
+  for (const card of cards) {
+    const type = HAND_TYPE_PRIORITY_CALC.find(t => card.types?.includes(t)) || 'Other';
+    if (!groups[type]) groups[type] = [];
+    groups[type].push(card);
+  }
+
+  const groupsHTML = HAND_TYPE_PRIORITY_CALC
+    .filter(t => groups[t])
+    .map(t => {
+      const color = TYPE_COLORS[t] || TYPE_COLORS.Other;
+      const rowsHTML = groups[t].map(card => {
+        const imgAttr  = card.imageUrl     ? `data-image-url="${card.imageUrl.replace(/"/g, '&quot;')}"` : '';
+        const backAttr = card.backImageUrl ? `data-back-image-url="${card.backImageUrl.replace(/"/g, '&quot;')}"` : '';
+        return `<div class="card-row card-row--clickable" style="padding:4px 8px"
+          ${imgAttr} ${backAttr}
+          onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
+          onmouseleave="window.__preview?.hide()">
+          <span class="legend-dot" style="background:${color};flex-shrink:0"></span>
+          <span class="card-row-name">${card.name.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</span>
+        </div>`;
+      }).join('');
+      return `<div class="hand-column">
+        <div class="hand-column-header" style="color:${color}">${t} (${groups[t].length})</div>
+        ${rowsHTML}
+      </div>`;
+    }).join('');
+
+  const overlay = document.createElement('div');
+  overlay.className = 'calc-card-modal-overlay hands-modal-overlay';
+  overlay.innerHTML = `
+    <div class="hands-modal">
+      <div class="hands-modal-header">
+        <span>${title} (${cards.length})</span>
+        <button class="btn-icon" onclick="this.closest('.calc-card-modal-overlay').remove()">✕</button>
+      </div>
+      <div class="hands-modal-body">${groupsHTML}</div>
+    </div>`;
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+const CALC_CRIT_TYPES_COMBINED = ['types_and_tags', 'types_and_tags_at_mv'];
+
+function _calcGetDef(defId) {
+  return getDeckById(activeDeckId)?.effectDefs?.find(d => d.id === defId) ?? null;
+}
+
+function _calcSaveAndRefresh(defId) {
+  const deck = getDeckById(activeDeckId);
+  const def  = deck?.effectDefs?.find(d => d.id === defId);
+  if (!deck || !def) return;
+  updateEffectDef(deck.id, def);
+  refresh();
+}
+
+function _calcUpdateCombinedSummary(defId, critIdx) {
+  const row     = document.querySelector(`[data-calc-def-id="${defId}"][data-calc-crit-idx="${critIdx}"]`);
+  const details = row?.querySelector('details[data-ms-type="combined"]');
+  if (!details) return;
+  const getText = el => el.closest('.ms-item')?.querySelector('span')?.textContent?.trim();
+  const checkedTypes = [...details.querySelectorAll('.ms-item[data-group="type"] input:checked')].map(getText).filter(Boolean);
+  const checkedTags  = [...details.querySelectorAll('.ms-item[data-group="tag"]  input:checked')].map(getText).filter(Boolean);
+  const parts = [];
+  if (checkedTypes.length) parts.push(checkedTypes.join('/'));
+  if (checkedTags.length)  parts.push(checkedTags.join('/'));
+  const sumEl = details.querySelector('.crit-ms-toggle');
+  if (sumEl) sumEl.textContent = parts.length ? parts.join(' & ') : '(Any Card)';
+}
+
+function _calcUpdateMsSummary(defId, critIdx, fieldKey, placeholder) {
+  const row     = document.querySelector(`[data-calc-def-id="${defId}"][data-calc-crit-idx="${critIdx}"]`);
+  const details = row?.querySelector(`[data-ms-key="${fieldKey}"]`)?.closest('details');
+  if (!details) return;
+  const checked = [...details.querySelectorAll('.ms-item input:checked')]
+    .map(el => el.closest('.ms-item')?.querySelector('span')?.textContent?.trim()).filter(Boolean);
+  const sumEl = details.querySelector('.crit-ms-toggle');
+  if (sumEl) sumEl.textContent = checked.length ? checked.join('/') : placeholder;
+}
+
+function _calcUpdateGraphsInDom(defId) {
+  const deck = getDeckById(activeDeckId);
+  const def  = deck?.effectDefs?.find(d => d.id === defId);
+  if (!def) return;
+  const K       = matchingCardsForEffect(deck, def.criteria || []).reduce((s, c) => s + c.quantity, 0);
+  const lookAtN = def.lookAtN  || 3;
+  const hitTarget = Math.min(def.hitTarget || 1, lookAtN);
+
+  const graphsEl = document.getElementById(`calc-graphs-${defId}`);
+  if (graphsEl) {
+    graphsEl.innerHTML = buildNSensGraph(lookAtN, hitTarget, K) + buildSrcSensGraph(lookAtN, hitTarget, K);
+  }
+
+  // Update hit-list button text
+  const hitBtn = document.querySelector(`[data-hitlist-btn="${defId}"]`);
+  if (hitBtn) hitBtn.textContent = `Show all ${K} hits`;
+
+  const section = document.querySelector(`details[data-def-id="${defId}"]`);
+
+  // Update summary K= badge
+  const summarySpans = section?.querySelectorAll('.calc-effect-summary .muted');
+  if (summarySpans?.length) {
+    summarySpans[summarySpans.length - 1].textContent = `top ${lookAtN} · K=${K}`;
+  }
+
+  // Update summary pct chip
+  const canCalc = K > 0 && hitTarget <= K && hitTarget <= lookAtN;
+  const currentPct = canCalc ? Math.round(hypgeomAtLeast(hitTarget, 99, K, lookAtN) * 100) : 0;
+  const pctClass = K === 0 ? 'def-pct--none'
+    : currentPct >= 60 ? 'def-pct--good'
+    : currentPct >= 40 ? 'def-pct--warn' : 'def-pct--bad';
+  const pctChip = section?.querySelector('.calc-effect-summary .def-pct');
+  if (pctChip) {
+    pctChip.textContent = K > 0 ? currentPct + '%' : '—';
+    pctChip.className = `def-pct ${pctClass}`;
+  }
+}
+
+window.__calc = {
+  // ── Legacy (kept for backward compat) ──────────────────────────────────────
+  setN(n)      { setLabN(n);      refresh(); },
+  setTarget(t) { setLabTarget(t); refresh(); },
+
+  // ── Sub-tab ────────────────────────────────────────────────────────────────
+  setSubTab(tab) { setActiveSubTab(tab); refresh(); },
+
+  // ── Effect open/close tracking ─────────────────────────────────────────────
+  onEffectToggle(id, open) { setEffectOpen(id, open); },
+
+  // ── Effect CRUD ────────────────────────────────────────────────────────────
+  addEffect() {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    const id = generateId();
+    updateEffectDef(deck.id, { id, name: '', lookAtN: 3, hitTarget: 1, criteria: [] });
+    setEffectOpen(id, true);
+    refresh();
+  },
+
+  removeEffect(defId) {
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    showConfirmModal('Remove this effect?', () => {
+      removeEffectDef(deck.id, defId);
+      refresh();
+    }, { title: 'Remove Effect', confirmLabel: 'Remove', danger: true });
+  },
+
+  // ── N stepper ──────────────────────────────────────────────────────────────
+  incrementN(defId) {
+    const def = _calcGetDef(defId);
+    if (!def) return;
+    def.lookAtN = Math.min(99, (def.lookAtN || 3) + 1);
+    def.hitTarget = Math.min(def.hitTarget || 1, def.lookAtN);
+    _calcSaveAndRefresh(defId);
+  },
+
+  decrementN(defId) {
+    const def = _calcGetDef(defId);
+    if (!def) return;
+    def.lookAtN = Math.max(1, (def.lookAtN || 3) - 1);
+    def.hitTarget = Math.min(def.hitTarget || 1, def.lookAtN);
+    _calcSaveAndRefresh(defId);
+  },
+
+  setHitTarget(defId, n) {
+    const def = _calcGetDef(defId);
+    if (!def) return;
+    def.hitTarget = n;
+    _calcSaveAndRefresh(defId);
+  },
+
+  setEffectName(defId, val) {
+    const def = _calcGetDef(defId);
+    if (def) def.name = val;
+    // Save to storage without re-render (name input already reflects it)
+    const deck = getDeckById(activeDeckId);
+    if (deck && def) updateEffectDef(deck.id, def);
+  },
+
+  // ── Criteria CRUD ──────────────────────────────────────────────────────────
+  addCrit(defId) {
+    const def = _calcGetDef(defId);
+    if (!def) return;
+    const first = CRITERION_TYPE_OPTIONS[0];
+    def.criteria = [...(def.criteria || []), { type: first.id, ...first.defaultValues() }];
+    _calcSaveAndRefresh(defId);
+  },
+
+  removeCrit(defId, idx) {
+    const def = _calcGetDef(defId);
+    if (!def) return;
+    def.criteria = (def.criteria || []).filter((_, i) => i !== idx);
+    _calcSaveAndRefresh(defId);
+  },
+
+  changeCritType(defId, idx, type) {
+    const def = _calcGetDef(defId);
+    if (!def) return;
+    const typeInfo = CRITERION_TYPES[type];
+    if (!typeInfo) return;
+    def.criteria[idx] = { type, ...typeInfo.defaultValues() };
+    _calcSaveAndRefresh(defId);
+  },
+
+  // ── Criteria value toggles (targeted DOM update, no full refresh) ───────────
+  toggleType(defId, idx, typeName, fieldKey = 'cardTypes') {
+    const def = _calcGetDef(defId);
+    if (!def?.criteria?.[idx]) return;
+    const current = def.criteria[idx][fieldKey] || [];
+    def.criteria[idx][fieldKey] = current.includes(typeName)
+      ? current.filter(t => t !== typeName) : [...current, typeName];
+    const deck = getDeckById(activeDeckId);
+    if (deck) updateEffectDef(deck.id, def);
+    if (CALC_CRIT_TYPES_COMBINED.includes(def.criteria[idx].type)) {
+      _calcUpdateCombinedSummary(defId, idx);
+    } else {
+      _calcUpdateMsSummary(defId, idx, fieldKey, '(Any Card)');
+    }
+    _calcUpdateGraphsInDom(defId);
+  },
+
+  toggleMv(defId, idx, mv) {
+    const def = _calcGetDef(defId);
+    if (!def?.criteria?.[idx]) return;
+    const current = def.criteria[idx].mvValues || [];
+    def.criteria[idx].mvValues = current.includes(mv)
+      ? current.filter(v => v !== mv) : [...current, mv];
+    const deck = getDeckById(activeDeckId);
+    if (deck) updateEffectDef(deck.id, def);
+    _calcUpdateMsSummary(defId, idx, 'mvValues', '(Any MV)');
+    _calcUpdateGraphsInDom(defId);
+  },
+
+  toggleSubtype(defId, idx, subtype) {
+    const def = _calcGetDef(defId);
+    if (!def?.criteria?.[idx]) return;
+    const current = def.criteria[idx].subtypes || [];
+    def.criteria[idx].subtypes = current.includes(subtype)
+      ? current.filter(s => s !== subtype) : [...current, subtype];
+    const deck = getDeckById(activeDeckId);
+    if (deck) updateEffectDef(deck.id, def);
+    _calcUpdateMsSummary(defId, idx, 'subtypes', '(Any Subtype)');
+    _calcUpdateGraphsInDom(defId);
+  },
+
+  toggleTag(defId, idx, tagName) {
+    const def = _calcGetDef(defId);
+    if (!def?.criteria?.[idx]) return;
+    const current = def.criteria[idx].tagNames || [];
+    def.criteria[idx].tagNames = current.includes(tagName)
+      ? current.filter(t => t !== tagName) : [...current, tagName];
+    const deck = getDeckById(activeDeckId);
+    if (deck) updateEffectDef(deck.id, def);
+    if (CALC_CRIT_TYPES_COMBINED.includes(def.criteria[idx].type)) {
+      _calcUpdateCombinedSummary(defId, idx);
+    } else {
+      _calcUpdateMsSummary(defId, idx, 'tagNames', '(Any Card)');
+    }
+    _calcUpdateGraphsInDom(defId);
+  },
+
+  toggleCard(defId, idx, cardName) {
+    const def = _calcGetDef(defId);
+    if (!def?.criteria?.[idx]) return;
+    const current = def.criteria[idx].cardNames || [];
+    def.criteria[idx].cardNames = current.includes(cardName)
+      ? current.filter(n => n !== cardName) : [...current, cardName];
+    const deck = getDeckById(activeDeckId);
+    if (deck) updateEffectDef(deck.id, def);
+    const selected = def.criteria[idx].cardNames;
+    _calcUpdateMsSummary(defId, idx, 'cardNames', '(select card…)');
+    _calcUpdateGraphsInDom(defId);
+  },
+
+  // ── Sample / Hit-list modals ───────────────────────────────────────────────
+  showHitList(defId) {
+    const deck = getDeckById(activeDeckId);
+    const def  = deck?.effectDefs?.find(d => d.id === defId);
+    if (!def) return;
+    const cards = matchingCardsForEffect(deck, def.criteria || []);
+    if (!cards.length) { showToast('No cards match all criteria.', 'info'); return; }
+    showCardListModal(`${def.name || 'Effect'} — Matching Cards`, cards);
+  },
+
+  showCritSample(defId, critIdx) {
+    const deck = getDeckById(activeDeckId);
+    const def  = deck?.effectDefs?.find(d => d.id === defId);
+    if (!def?.criteria?.[critIdx]) return;
+    const cards = matchingCardsForCriterion(deck, def.criteria[critIdx]);
+    if (!cards.length) { showToast('No cards match this criterion.', 'info'); return; }
+    showCardListModal('Sample — Criterion Matches', cards);
+  },
+};
+
 window.__deck = {
   rename() {
     const deck = getDeckById(activeDeckId);
@@ -1005,6 +1328,13 @@ function handleRunSimulation(deckId) {
   // Defer to next tick so the UI updates before the loop
   setTimeout(() => {
     try {
+      if (!deck.goodHandDefs?.length) {
+        updateDeckGoodHandDefs(deck.id, {
+          id: generateId(),
+          name: 'Keepable Hand',
+          criteria: [{ type: 'at_least_type', count: 3, cardType: 'Land' }],
+        });
+      }
       const goodHandDefs = deck.goodHandDefs || [];
       const results = runSimulation(deck, SIM_GAME_COUNT, goodHandDefs);
       results.goodHandDefNames = Object.fromEntries(
@@ -1012,7 +1342,6 @@ function handleRunSimulation(deckId) {
       );
       window.__currentSampleHands = results.sampleGoodHands || [];
       addResults(results);
-      activeTab = 'results';
       refresh();
       showToast(`Simulated ${SIM_GAME_COUNT.toLocaleString()} opening hands`, 'success');
     } catch (err) {
@@ -1023,108 +1352,6 @@ function handleRunSimulation(deckId) {
   }, 20);
 }
 
-// ─── Category Config Save/Load ────────────────────────────────────────────────
-
-function bindCategoryConfig() {
-  document.getElementById('cat-export-btn')?.addEventListener('click', () => {
-    try {
-      const json = exportCategoryConfig();
-      const blob = new Blob([json], { type: 'application/json' });
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'mullstat-categories.json';
-      a.click();
-      URL.revokeObjectURL(url);
-      showToast('Category config exported', 'success');
-    } catch (err) {
-      showToast(`Export failed: ${err.message}`, 'error');
-    }
-  });
-
-  const catImportBtn = document.getElementById('cat-import-btn');
-  const catImportInput = document.getElementById('cat-import-input');
-
-  catImportBtn?.addEventListener('click', () => catImportInput?.click());
-
-  catImportInput?.addEventListener('change', async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      const text = await file.text();
-      importCategoryConfig(text);
-      rederiveAllCardCategories();
-      categoryConfigOpen = true;
-      refresh();
-      showToast('Category config imported successfully', 'success');
-    } catch (err) {
-      showToast(`Import failed: ${err.message}`, 'error');
-    }
-    e.target.value = '';
-  });
-}
-
-// ─── Category Cards Popup ─────────────────────────────────────────────────────
-
-window.__dash = {
-  showCategoryCards(catName) {
-    const deck = getDeckById(activeDeckId);
-    if (!deck) return;
-    const TYPE_ORDER = ['Creature','Sorcery','Instant','Artifact','Enchantment','Land','Planeswalker','Battle','MDFC','Other'];
-    const matchingCards = deck.cards.filter(c => (c.categories || []).includes(catName));
-    if (!matchingCards.length) {
-      showToast(`No cards in "${catName}"`, 'info');
-      return;
-    }
-
-    // Sort by primary type (same order as cards tab)
-    matchingCards.sort((a, b) => {
-      const ai = TYPE_ORDER.findIndex(t => a.types?.includes(t));
-      const bi = TYPE_ORDER.findIndex(t => b.types?.includes(t));
-      const order = (ai === -1 ? TYPE_ORDER.length : ai) - (bi === -1 ? TYPE_ORDER.length : bi);
-      return order !== 0 ? order : a.name.localeCompare(b.name);
-    });
-
-    document.querySelector('.cat-cards-modal-overlay')?.remove();
-
-    // Split into columns of max 10 cards each
-    const COL_SIZE = 10;
-    const cols = [];
-    for (let i = 0; i < matchingCards.length; i += COL_SIZE) {
-      cols.push(matchingCards.slice(i, i + COL_SIZE));
-    }
-
-    const colsHTML = cols.map(col => {
-      const rows = col.map(card => {
-        const safeName = card.name.replace(/&/g, '&amp;').replace(/</g, '&lt;');
-        const imgAttr  = card.imageUrl     ? `data-image-url="${card.imageUrl.replace(/"/g, '&quot;')}"` : '';
-        const backAttr = card.backImageUrl ? `data-back-image-url="${card.backImageUrl.replace(/"/g, '&quot;')}"` : '';
-        const qty = card.quantity > 1 ? `<span class="muted" style="font-size:10px">${card.quantity}× </span>` : '';
-        const primaryType = (card.types || []).find(t => TYPE_COLORS[t]) || 'Other';
-        const typeColor = TYPE_COLORS[primaryType] || TYPE_COLORS.Other;
-        const typeChip = `<span style="display:inline-block;width:8px;height:8px;border-radius:50%;background:${typeColor};margin-right:4px;flex-shrink:0"></span>`;
-        return `<div class="card-row card-row--clickable" style="padding:4px 8px"
-          ${imgAttr} ${backAttr}
-          onmouseenter="window.__preview?.show(this.dataset.imageUrl,this.dataset.backImageUrl)"
-          onmouseleave="window.__preview?.hide()">${typeChip}${qty}<span class="card-row-name">${safeName}</span></div>`;
-      }).join('');
-      return `<div class="hand-column">${rows}</div>`;
-    }).join('');
-
-    const overlay = document.createElement('div');
-    overlay.className = 'cat-cards-modal-overlay hands-modal-overlay';
-    overlay.innerHTML = `
-      <div class="hands-modal" style="max-width:800px">
-        <div class="hands-modal-header">
-          <span>${catName} (${matchingCards.reduce((s, c) => s + c.quantity, 0)} cards)</span>
-          <button class="btn-icon" onclick="this.closest('.cat-cards-modal-overlay').remove()">✕</button>
-        </div>
-        <div class="hands-modal-body" style="flex-wrap:wrap">${colsHTML}</div>
-      </div>`;
-    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
-    document.body.appendChild(overlay);
-  },
-};
 
 // ─── Save / Load ──────────────────────────────────────────────────────────────
 

@@ -184,7 +184,7 @@ describe('CRITERION_TYPES registry', () => {
     );
     assert.equal(
       CRITERION_TYPES.at_least_n_of_types.describe({ count: 1, cardTypes: ['Land', 'Creature'] }),
-      '≥1 of: Land or Creature',
+      '≥1 Land or Creature',
     );
   });
 

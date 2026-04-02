@@ -120,11 +120,12 @@ export function mapTagsToCategories(slugs, keywords = [], oracleText = null, cus
 async function fetchFromWorker(cards) {
   let res;
   for (let attempt = 0; attempt < 3; attempt++) {
-    if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 1500));
+    if (attempt > 0) await new Promise(r => setTimeout(r, attempt * 12000));
     res = await fetch(WORKER_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ cards }),
+      //signal: AbortSignal.timeout(240000),
     });
     if (res.status !== 429 && res.status !== 503) break;
   }

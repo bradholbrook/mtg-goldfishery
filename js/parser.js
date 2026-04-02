@@ -33,7 +33,7 @@ function defaultGoodHandDefs() {
     {
       id: generateId(),
       name: '3+ Lands',
-      criteria: [{ type: 'at_least_type', count: 3, cardType: 'Land' }],
+      criteria: [{ type: 'types_and_tags', count: 3, cardTypes: ['Land'], tagNames: [], mvValues: [] }],
     },
   ];
 }
@@ -65,23 +65,30 @@ function guessTypeFromName(name) {
 }
 
 /**
- * Parse a single line like "1 Sol Ring" or "4 Lightning Bolt".
- * Returns { quantity, name } or null if the line is not a card entry.
+ * Parse a single line like "1 Sol Ring #ramp #mana-rock" or "4 Lightning Bolt".
+ * Returns { quantity, name, moxTags } or null if the line is not a card entry.
+ * Tags are Moxfield-style #tag or #!tag markers anywhere on the line.
  */
 function parseLine(line) {
   const trimmed = line.trim();
   if (!trimmed || trimmed.startsWith('//')) return null;
 
-  // Match "N Card Name" — quantity is 1 or 2 digits
+  // Match "N Card Name ..." — quantity is 1 or 2 digits
   const match = trimmed.match(/^(\d{1,2})\s+(.+)$/);
   if (!match) return null;
 
   const quantity = parseInt(match[1], 10);
+  let rest = match[2];
+
+  // Extract Moxfield tags: #tag or #!tag (strip # or #!, collect the word)
+  const moxTags = [];
+  rest = rest.replace(/#!?(\w[\w-]*)/g, (_, tag) => { moxTags.push(tag); return ''; });
+
   // Strip set/collector info that some exports append: "Sol Ring (C21) 263"
-  const name = match[2].replace(/\s*\([^)]+\)\s*\d*\s*$/, '').trim();
+  const name = rest.replace(/\s*\([^)]+\)\s*\d*\s*$/, '').trim();
 
   if (!name || quantity < 1) return null;
-  return { quantity, name };
+  return { quantity, name, moxTags };
 }
 
 /**
@@ -117,7 +124,7 @@ export function parseMoxfieldDecklist(text, deckName = 'Unnamed Deck') {
     const parsed = parseLine(line);
     if (!parsed) continue;
 
-    const { quantity, name } = parsed;
+    const { quantity, name, moxTags } = parsed;
     const isCommander = inCommanderSection;
 
     if (isCommander && !commanderName) {
@@ -133,14 +140,19 @@ export function parseMoxfieldDecklist(text, deckName = 'Unnamed Deck') {
 
     if (cardMap.has(name)) {
       // Accumulate quantity if same card appears multiple times
-      cardMap.get(name).quantity += quantity;
+      const existing = cardMap.get(name);
+      existing.quantity += quantity;
+      // Merge tags (union — same card listed twice may have different tags)
+      for (const t of moxTags) {
+        if (!existing.moxTags.includes(t)) existing.moxTags.push(t);
+      }
     } else {
       cardMap.set(name, {
         name,
         quantity,
         types: [guessTypeFromName(name)], // Placeholder until Scryfall
         isCommander,
-        // Future fields: manaCost, cmc, tags, oracleText, scryfallId, priority
+        moxTags,
       });
     }
   }
@@ -216,18 +228,26 @@ export function parseMoxfieldApiResponse(apiData, nameOverride = '') {
   const cards = [];
   let commanderName = null;
 
+  // authorTags is a top-level map: { "Card Name": ["tag1", "tag2"], ... }
+  const authorTags = (apiData.authorTags && typeof apiData.authorTags === 'object') ? apiData.authorTags : {};
+
   function processSection(section, isCommander) {
     if (!section || typeof section !== 'object') return;
     for (const entry of Object.values(section)) {
       const { quantity, card } = entry;
       if (!card || !card.name) continue;
       if (isCommander && !commanderName) commanderName = card.name;
+      // Merge per-entry tags and top-level authorTags (union, no duplicates)
+      const entryTags = Array.isArray(entry.tags) ? entry.tags.filter(t => t && typeof t === 'string') : [];
+      const fromAuthor = Array.isArray(authorTags[card.name]) ? authorTags[card.name].filter(t => t && typeof t === 'string') : [];
+      const moxTags = [...new Set([...entryTags, ...fromAuthor])];
       cards.push({
         name: card.name,
         quantity: quantity || 1,
         types: ['Unknown'], // Scryfall enrichment will set the real type
         isCommander: !!isCommander,
         moxfieldScryfallId: card.scryfall_id || null,
+        moxTags,
       });
     }
   }

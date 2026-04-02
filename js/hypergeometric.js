@@ -50,7 +50,7 @@ function logGamma(x) {
  * @param {number} k
  * @returns {number}
  */
-function logBinom(n, k) {
+export function logBinom(n, k) {
   if (k < 0 || k > n) return -Infinity;
   if (k === 0 || k === n) return 0;
   return logGamma(n + 1) - logGamma(k + 1) - logGamma(n - k + 1);

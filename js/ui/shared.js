@@ -29,6 +29,14 @@ export const CATEGORY_COLORS = {
   'Discover':    '#e879f9',
 };
 
+/** Assign a consistent hue-based color to a tag/category name. */
+export function tagColor(tag) {
+  let hash = 0;
+  for (let i = 0; i < tag.length; i++) hash = (hash * 31 + tag.charCodeAt(i)) | 0;
+  const hue = Math.abs(hash) % 360;
+  return `hsl(${hue}, 55%, 60%)`;
+}
+
 export function escapeHtml(str) {
   if (!str) return '';
   return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
