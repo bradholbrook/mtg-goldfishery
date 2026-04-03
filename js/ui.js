@@ -12,7 +12,7 @@ import { CARD_TYPES } from './types.js';
 import { hypgeomAtLeast, expectedValue } from './hypergeometric.js';
 import { buildCardBrowser } from './ui/cards-tab.js';
 import { buildMulliganTab } from './ui/config-tab.js';
-import { buildCalculateTab, extractDeckProfile, buildCastabilitySection } from './ui/calculate-tab.js';
+import { buildCalculateTab, extractDeckProfile, buildCastabilitySection, buildManaAnalysisSection } from './ui/calculate-tab.js';
 
 // ─── Active Deck Panel ────────────────────────────────────────────────────────
 
@@ -91,7 +91,7 @@ function buildDashboardPlaceholder(deck, expandedTypeGroups, cardBrowserView, ca
 
     handMathHTML = `
       <div class="section" style="margin-bottom:0">
-        <div class="section-label">Opening Hand Analysis</div>
+        <div class="section-label">Land Analysis</div>
         <div class="hand-stats-grid">
           <div class="hand-stat-card">
             <div class="hand-stat-big">${eLands}</div>
@@ -130,6 +130,7 @@ function buildDashboardPlaceholder(deck, expandedTypeGroups, cardBrowserView, ca
     </div>`;
 
   // ── Commander Hero ────────────────────────────────────────────────────────
+  const deckProfile = extractDeckProfile(deck);
   let heroSection = '';
   if (commanderCards.length > 0) {
     const cmdCard = commanderCards[0];
@@ -141,14 +142,20 @@ function buildDashboardPlaceholder(deck, expandedTypeGroups, cardBrowserView, ca
       ? `<div class="commander-mox-tags">${cmdCard.moxTags.map(t => `<span class="mox-tag">${escapeHtml(t)}</span>`).join('')}</div>`
       : '';
 
-    const castabilitySection = buildCastabilitySection(extractDeckProfile(deck));
+    const manaAnalysis = buildManaAnalysisSection(deckProfile);
+    const castabilitySection = buildCastabilitySection(deckProfile);
+    const castManaRow = manaAnalysis ? `
+      <div class="cast-mana-row">
+        <div class="cast-mana-col">${manaAnalysis}</div>
+        <div class="cast-mana-col">${castabilitySection}</div>
+      </div>` : `<div>${castabilitySection}</div>`;
     heroSection = `
       <div class="commander-hero">
         <div class="commander-hero-left">${imgHTML}${cmdTagsHTML}</div>
         <div class="commander-hero-right">
           ${statChips}
           ${handMathHTML}
-          ${castabilitySection}
+          ${castManaRow}
         </div>
       </div>`;
   } else {
@@ -186,7 +193,7 @@ function buildDashboardPlaceholder(deck, expandedTypeGroups, cardBrowserView, ca
       <div class="mc-col-chart mc-col-chart--compact">${manaCurveRows}</div>
     </div>`;
 
-  const cardBrowser = buildCardBrowser(deck, expandedTypeGroups, cardBrowserView, cardBrowserSort);
+  const cardBrowser = buildCardBrowser(deck, expandedTypeGroups, cardBrowserView, cardBrowserSort, deckProfile);
 
   return `
     ${heroSection}
@@ -205,17 +212,21 @@ function buildTypePieChart(allCards) {
 
   const typeCounts = {};
   for (const card of allCards) {
-    const type = CARD_TYPES.find(t => card.types?.includes(t)) || 'Other';
-    typeCounts[type] = (typeCounts[type] || 0) + card.quantity;
+    const matched = CARD_TYPES.filter(t => card.types?.includes(t));
+    if (matched.length === 0) matched.push('Other');
+    for (const type of matched) {
+      typeCounts[type] = (typeCounts[type] || 0) + card.quantity;
+    }
   }
 
   const entries = CARD_TYPES
     .filter(t => typeCounts[t] > 0)
     .map(t => ({ type: t, count: typeCounts[t], color: TYPE_COLORS[t] || TYPE_COLORS.Other }));
 
+  const typeTotal = entries.reduce((s, e) => s + e.count, 0);
   let angle = 0;
   const slices = entries.map(({ count, color }) => {
-    const deg = (count / total) * 360;
+    const deg = (count / typeTotal) * 360;
     const start = angle.toFixed(1);
     angle += deg;
     return `${color} ${start}deg ${angle.toFixed(1)}deg`;
@@ -271,8 +282,9 @@ export function showToast(message, type = 'info') {
 
   requestAnimationFrame(() => toast.classList.add('toast--visible'));
 
+  const duration = type === 'error' ? 7000 : type === 'warn' ? 5000 : 3500;
   setTimeout(() => {
     toast.classList.remove('toast--visible');
     toast.addEventListener('transitionend', () => toast.remove());
-  }, 3500);
+  }, duration);
 }

@@ -270,17 +270,21 @@ function simulateCastability(library, startHand, commanderCost) {
       const types = c.types ?? [];
       return types.includes('Artifact') || types.includes('Creature');
     });
+    const played = [];
     for (const rock of rocksAndDorks) {
       // Can we afford to play it this turn? (simplified: costs 1-3 mana, use total available)
       const cost = rock.cmc ?? 2;
       if (cost <= totalMana) {
         totalMana -= cost;
-        hand.splice(hand.indexOf(rock), 1);
+        played.push(rock);
         // Rock contributes mana starting NEXT turn (summoning sickness)
         const rockMana = rock.effectTags?.find(t => t.subtype === 'mana_rock' || t.subtype === 'mana_dork')?.value ?? 1;
         const rockColors = rock.producedMana ?? [];
         pendingMana.push({ mana: rockMana, colors: rockColors });
       }
+    }
+    for (const rock of played) {
+      hand.splice(hand.indexOf(rock), 1);
     }
 
     // Check if commander is castable

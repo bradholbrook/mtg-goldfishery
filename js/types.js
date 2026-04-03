@@ -17,6 +17,7 @@
  * @property {string|null}  manaCost       - e.g. "{2}{B}{B}"
  * @property {string[]|null} keywords      - e.g. ["Flying", "Deathtouch"]
  * @property {string[]|null} producedMana  - e.g. ["B", "G"]
+ * @property {string[]}     [colorIdentity] - Scryfall color identity e.g. ["W","U","G"]
  * @property {string|null}  scryfallId     - Printing-specific UUID from Scryfall
  * @property {string|null}  oracleId       - Oracle-level UUID (same across all printings)
  * @property {string|null}  set            - Scryfall set code, e.g. 'eld'

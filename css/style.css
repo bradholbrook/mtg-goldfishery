@@ -447,8 +447,9 @@ textarea.input-text {
 .color-source-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   margin: 4px 0;
+  white-space: nowrap;
 }
 .color-pip {
   width: 18px;
@@ -2009,7 +2010,8 @@ details[open] .card-analysis-summary::before { transform: rotate(90deg); }
   font-size: 12px;
   font-weight: 700;
   flex-shrink: 0;
-  box-shadow: inset 0 0 0 9999px rgba(0,0,0,0.28);
+  box-shadow: inset 0 0 0 9999px rgba(0,0,0,0.45);
+  border: 1.5px solid rgba(255,255,255,0.25);
 }
 
 /* ─── Card Row (compact, single-line) ───────────────────────────────────────── */
@@ -3084,4 +3086,135 @@ details[open] .category-config-summary::before { transform: rotate(90deg); }
 
 @media (max-width: 700px) {
   .calc-two-col, .calc-graphs-row { grid-template-columns: 1fr; }
+}
+
+/* ─── Color Turn Picker ──────────────────────────────────────────────────── */
+.turn-picker-row {
+  display: flex;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+.turn-picker-btn {
+  width: 26px;
+  height: 26px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-3);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+.turn-picker-btn:hover { background: var(--bg-4); color: var(--text-primary); }
+.turn-picker-btn--active {
+  background: var(--accent-dim);
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+/* ─── Info Icon Button ────────────────────────────────────────────────────── */
+.info-icon-btn {
+  width: 18px;
+  height: 18px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--bg-3);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+  line-height: 1;
+  padding: 0;
+  flex-shrink: 0;
+  transition: background 0.1s, color 0.1s;
+}
+.info-icon-btn:hover { background: var(--bg-4); color: var(--text-primary); }
+
+/* ─── Card Preview Meta Line (castability etc.) ───────────────────────────── */
+.preview-meta-line {
+  display: block;
+  background: var(--bg-3);
+  border: 1px solid var(--border-bright);
+  border-radius: 10px;
+  padding: 2px 8px;
+  font-size: 10px;
+  font-family: var(--font-mono);
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 4px;
+}
+
+/* ─── On-curve meta pill (inline with tags, colored by threshold) ─────────── */
+.preview-tag-pill--meta-good {
+  color: var(--green);
+  border-color: var(--green);
+  background: rgba(74, 222, 128, 0.12);
+}
+.preview-tag-pill--meta-warn {
+  color: var(--yellow);
+  border-color: var(--yellow);
+  background: rgba(251, 191, 36, 0.12);
+}
+.preview-tag-pill--meta-bad {
+  color: var(--red);
+  border-color: var(--red);
+  background: rgba(248, 113, 113, 0.12);
+}
+
+/* ─── Castability + Mana Analysis ─────────────────────────────────────────── */
+.color-pip-spacer {
+  width: 18px;
+  flex-shrink: 0;
+}
+
+.cast-mana-row {
+  display: flex;
+  gap: 20px;
+  margin-top: 10px;
+}
+.cast-mana-row > .cast-mana-col {
+  flex: 1 1 0;
+  min-width: 0;
+}
+@media (max-width: 640px) {
+  .cast-mana-row { flex-direction: column; }
+}
+
+/* ─── Castability Chart ────────────────────────────────────────────────────── */
+.mc-col-chart--cast { height: 150px; }
+.mc-col-chart--cast .mc-col-bar-wrap { padding-top: 20px; }
+.mc-col-chart--cast .mc-col-count--above { font-size: 10px; font-weight: 600; }
+.mc-col-chart--cast .mc-col-label { font-size: 10px; }
+
+.cast-rec-line {
+  font-size: 11px;
+  color: var(--yellow);
+  margin-top: 6px;
+}
+
+/* ─── Cascade / Discover Card Pile ────────────────────────────────────────── */
+.cascade-card-pile {
+  display: flex;
+  flex-direction: column;
+  width: 230px;
+}
+.cascade-stack-item {
+  width: 230px !important;
+  height: 38px;
+}
+.cascade-stack-item.card-stack-item--last {
+  height: auto;
+}
+.cascade-stack-item img {
+  width: 230px;
+}
+.cascade-stack-item.card-stack-item--noimage {
+  width: 230px !important;
+}
+.cascade-stack-item.card-stack-item--last.card-stack-item--noimage {
+  height: 140px;
 }

@@ -33,7 +33,7 @@ function defaultGoodHandDefs() {
     {
       id: generateId(),
       name: '3+ Lands',
-      criteria: [{ type: 'types_and_tags', count: 3, cardTypes: ['Land'], tagNames: [], mvValues: [] }],
+      criteria: [{ type: 'types_and_tags', count: 3, cardTypes: ['Land'], tagNames: [], mvValues: [], subtypes: [] }],
     },
   ];
 }

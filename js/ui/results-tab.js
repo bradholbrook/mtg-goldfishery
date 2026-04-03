@@ -50,7 +50,6 @@ export function buildResultsBottomSection(results, deck, resultView, resultSort 
         <div>${buildMulliganDepthChart(summary)}</div>
         <div>${buildHandStatsSection(summary, deck, resultView, resultSort)}</div>
       </div>
-      ${buildPerCardAnalysis(deck)}
     </div>`;
 }
 

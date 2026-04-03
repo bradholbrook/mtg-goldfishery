@@ -24,19 +24,15 @@ function mullApplicabilityNote(def) {
 }
 
 export function buildMulliganTab(deck, editingDef, results, resultView, resultSort = 'value') {
-  const bottomPriorityCollapsible = `
-    <details class="category-config-editor" style="margin-top:16px" ${_bottomOpen ? 'open' : ''}
-      ontoggle="window.__disc.toggleBottom(this.open)">
-      <summary class="category-config-summary">Bottom Selection Priority</summary>
-      <div class="category-config-body">
-        ${buildBottomSelectionSection(deck)}
-      </div>
-    </details>`;
+  const handDefsCol = buildGoodHandSection(deck, editingDef, getResultsForDeck(deck.id));
+  const bottomCol = buildBottomPrioritySection(deck);
 
   return buildRunSection(deck)
     + buildResultsTopSection(results)
-    + buildGoodHandSection(deck, editingDef, getResultsForDeck(deck.id))
-    + bottomPriorityCollapsible
+    + `<div class="cast-mana-row" style="margin-top:16px">
+        <div class="cast-mana-col">${handDefsCol}</div>
+        <div class="cast-mana-col">${bottomCol}</div>
+      </div>`
     + buildResultsBottomSection(results, deck, resultView, resultSort);
 }
 
@@ -129,12 +125,10 @@ function buildGoodHandSection(deck, editingDef, allResults) {
 
   return `
     <div class="section">
-      <div class="section-label">Keep Conditions</div>
-      <p class="muted" style="font-size:12px;margin-bottom:6px">
-        Define what makes a hand worth keeping. The simulator checks each definition in order and keeps
-        the first match. If a definition's criteria can be satisfied by fewer cards than the hand size,
-        it auto-applies at that mull depth.
-      </p>
+      <div class="section-label" style="display:flex;align-items:center;gap:8px">
+        Keep Conditions
+        <button class="info-icon-btn" onclick="window.__ghh.showInfo()" title="How keep conditions work">ℹ</button>
+      </div>
       ${priorityHint}
       ${defs.length === 0 && !editingDef
         ? `<p class="muted" style="font-size:12px;margin-bottom:10px">No definitions yet. Define what a keepable hand looks like.</p>`
@@ -316,11 +310,19 @@ function buildBottomSelectionSection(deck) {
 
   return `
     <div>
-      <p class="muted" style="font-size:12px;margin-bottom:8px">
-        When mulliganing to 6/5/4, cards are put back according to these rules (top-to-bottom, first match wins).
-      </p>
       ${listHTML}
       <button class="btn-secondary btn-sm" style="margin-top:6px" onclick="window.__disc.add()">+ Add Rule</button>
+    </div>`;
+}
+
+function buildBottomPrioritySection(deck) {
+  return `
+    <div class="section">
+      <div class="section-label" style="display:flex;align-items:center;gap:8px">
+        Bottom Selection
+        <button class="info-icon-btn" onclick="window.__disc.showInfo()" title="How bottom selection works">ℹ</button>
+      </div>
+      ${buildBottomSelectionSection(deck)}
     </div>`;
 }
 
@@ -328,14 +330,11 @@ function buildBottomSelectionSection(deck) {
 
 function buildRunSection(deck) {
   return `
-    <div class="section" style="margin-top:16px">
-      <div class="section-label">Simulation</div>
-      <p class="muted" style="font-size:12px;margin-bottom:10px">
-        Runs 100,000 London Mulligan simulations and evaluates your keep conditions.
-      </p>
+    <div class="section" style="margin-top:16px;display:flex;align-items:center;gap:8px">
       <button id="run-sim-btn" class="btn-primary" data-deck-id="${deck.id}">
         ▶ Run Simulation
       </button>
+      <button class="info-icon-btn" onclick="window.__sim.showInfo()" title="Simulation details">ℹ</button>
     </div>`;
 }
 

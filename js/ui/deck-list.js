@@ -44,16 +44,15 @@ export function renderDeckList(onSelectDeck, onDeleteDeck) {
       </div>`;
   }).join('');
 
-  // Event delegation
-  container.querySelectorAll('.deck-card').forEach(el => {
-    el.addEventListener('click', (e) => {
-      const deleteBtn = e.target.closest('[data-action="delete"]');
-      if (deleteBtn) {
-        e.stopPropagation();
-        onDeleteDeck(deleteBtn.dataset.deckId);
-        return;
-      }
-      onSelectDeck(el.dataset.deckId);
-    });
-  });
+  // Single delegated listener on the container — avoids leaking per-element listeners on re-render
+  container.onclick = (e) => {
+    const deleteBtn = e.target.closest('[data-action="delete"]');
+    if (deleteBtn) {
+      e.stopPropagation();
+      onDeleteDeck(deleteBtn.dataset.deckId);
+      return;
+    }
+    const deckCard = e.target.closest('.deck-card');
+    if (deckCard) onSelectDeck(deckCard.dataset.deckId);
+  };
 }

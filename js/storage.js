@@ -70,6 +70,28 @@ export function removeDeck(deckId) {
   appState.results = appState.results.filter(r => r.deckId !== deckId);
 }
 
+// ─── Deck Card & Tag Updates ─────────────────────────────────────────────────
+
+/**
+ * Replace the cards array on a deck and clean up temporary enrichment fields.
+ */
+export function updateDeckCards(deckId, cards) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.cards = cards;
+  delete deck._enrichmentMap;
+}
+
+/**
+ * Update the tagsStatus field on a deck.
+ */
+export function updateDeckTagsStatus(deckId, status) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.tagsStatus = status;
+  delete deck._enrichmentMap;
+}
+
 // ─── Effect Def Management ────────────────────────────────────────────────────
 
 export function updateEffectDef(deckId, def) {
@@ -254,6 +276,15 @@ export function updateDeckGoodHandDefs(deckId, def) {
   } else {
     deck.goodHandDefs.push(def);
   }
+}
+
+/**
+ * Replace the entire goodHandDefs array on a deck (e.g. for reordering).
+ */
+export function setDeckGoodHandDefsAll(deckId, defs) {
+  const deck = appState.decks.find(d => d.id === deckId);
+  if (!deck) return;
+  deck.goodHandDefs = defs;
 }
 
 /**

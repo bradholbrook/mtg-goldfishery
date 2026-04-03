@@ -7,7 +7,7 @@
 
 import { logBinom, hypgeomAtLeast, expectedValue } from '../hypergeometric.js';
 import { CARD_TYPES, CANONICAL_CATEGORIES } from '../types.js';
-import { escapeHtml, TYPE_COLORS } from './shared.js';
+import { escapeHtml, TYPE_COLORS, tagColor } from './shared.js';
 import { CRITERION_TYPES, CRITERION_TYPE_OPTIONS } from '../criteria.js';
 
 // ─── Module-level Lab State ───────────────────────────────────────────────────
@@ -17,6 +17,15 @@ let _labTarget = 'Land';
 
 export function setLabN(n)      { _labN = n; }
 export function setLabTarget(t) { _labTarget = t; }
+
+// Selected turn for color-by-turn analysis (null = use commander CMC)
+let _colorTurn = null;
+export function setColorTurn(t) { _colorTurn = t; }
+
+
+// Last castability info text — set during render, read by window.__cast.showInfo()
+let _castInfoText = '';
+export function getCastInfoText() { return _castInfoText; }
 
 // ─── Effect Lab State ─────────────────────────────────────────────────────────
 
@@ -28,13 +37,25 @@ export function setEffectOpen(id, open) {
   if (open) _openEffectIds.add(id); else _openEffectIds.delete(id);
 }
 
+// ─── Cascade/Discover State ──────────────────────────────────────────────────
+
+let _cascadeMV = 5;
+let _cascadeMode = 'cascade'; // 'cascade' | 'discover'
+let _cascadeSort = 'value'; // 'value' | 'alpha'
+let _cascadeFilter = null; // null = all types
+
+export function setCascadeMV(n) { _cascadeMV = n; }
+export function setCascadeMode(m) { _cascadeMode = m; }
+export function setCascadeSort(s) { _cascadeSort = s; }
+export function setCascadeFilter(f) { _cascadeFilter = f; }
+
 // ─── Entry Point ──────────────────────────────────────────────────────────────
 
 export function buildCalculateTab(deck) {
   return `
     <div style="padding:0 2px">
       ${buildSubTabBar()}
-      ${_activeSubTab === 'top_n' ? buildTopNTab(deck) : buildCascadeTab()}
+      ${_activeSubTab === 'top_n' ? buildTopNTab(deck) : buildCascadeTab(deck)}
     </div>`;
 }
 
@@ -104,8 +125,14 @@ function getManaValue(card, { commanderColorCount = 0 } = {}) {
 
 // ─── Ramp Classification & Bucketing ─────────────────────────────────────────
 
+function isRitual(card) {
+  const types = card.types ?? [];
+  if (!types.includes('Instant') && !types.includes('Sorcery')) return false;
+  return /\bAdd\s*\{/i.test(card.oracleText ?? '');
+}
+
 function isRamp(card) {
-  return card.categories?.some(c => ['Ramp', 'Mana Rock', 'Mana Dork'].includes(c));
+  return card.categories?.some(c => ['Ramp', 'Mana Rock', 'Mana Dork'].includes(c)) || isRitual(card);
 }
 
 function isDork(card) {
@@ -218,27 +245,52 @@ export function extractDeckProfile(deck) {
 
   // Color sources must be computed before ramp buckets (castability depends on them)
   const colorSources = { W: 0, U: 0, B: 0, R: 0, G: 0 };
+  // Land-only color sources for the "colors by turn" chart (no ramp — rocks/dorks
+  // need to be cast first, so simple hypergeometric draw doesn't apply to them)
+  const landColorSources = { W: 0, U: 0, B: 0, R: 0, G: 0 };
   for (const card of nonCmdr) {
     const produced = getProducedColors(card);
+    const isLand = card.types?.includes('Land');
     for (const c of produced) {
-      if (c in colorSources) colorSources[c] += card.quantity;
+      if (c in colorSources) {
+        colorSources[c] += card.quantity;
+        if (isLand) landColorSources[c] += card.quantity;
+      }
     }
   }
 
   const commanderCmc    = commander?.cmc ?? 0;
   const commanderColors = parsePipColors(commander?.manaCost);
+  // Color identity may include colors not in mana cost (e.g. ability pips, partner commanders)
+  const commanderColorIdentity = [...new Set(
+    (commander?.colorIdentity?.length ? commander.colorIdentity : commanderColors)
+      .filter(c => 'WUBRG'.includes(c))
+  )];
 
   const rampCards   = nonCmdr.filter(c => !c.types?.includes('Land') && isRamp(c));
   const rampBuckets = buildRampBuckets(rampCards, N, colorSources, landCount, commanderColors.length);
   const rampCount   = rampCards.reduce((s, c) => s + c.quantity, 0);
 
   return {
-    N, commander, commanderCmc, commanderColors,
+    N, commander, commanderCmc, commanderColors, commanderColorIdentity,
     landCount, untappedLandCount, tappedLandCount,
-    rampCount, rampBuckets, colorSources,
+    rampCount, rampBuckets, colorSources, landColorSources,
     nonCmdrCards: nonCmdr,  // needed for inclusion-exclusion color calc
     tagsStatus: deck.tagsStatus ?? 'ready',
   };
+}
+
+/**
+ * P(castable on curve) for a single non-commander card, given the deck's mana profile.
+ * Uses the same model as commander castability: lands + ramp on turn = card.cmc.
+ * Returns null for colorless spells, lands, or cards with no CMC.
+ */
+export function computeCardCastability(card, profile) {
+  if (!card.cmc || card.cmc <= 0) return null;
+  if (card.types?.includes('Land')) return null;
+  const cardColors = parsePipColors(card.manaCost);
+  const cardProfile = { ...profile, commanderCmc: card.cmc, commanderColors: cardColors };
+  return pCastOnTurn(card.cmc, cardProfile);
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -442,79 +494,58 @@ export function buildCastabilitySection(profile) {
 
   if (!commander) {
     return `
-      <div class="section">
-        <div class="section-label">Commander Castability</div>
-        <p class="muted" style="font-size:12px">No commander found in deck.</p>
-      </div>`;
+      <div class="section-label" style="display:flex;align-items:center;gap:8px">
+        Commander Castability
+      </div>
+      <p class="muted" style="font-size:12px">No commander found in deck.</p>`;
   }
 
   if (!commander.enriched) {
     return `
-      <div class="section">
-        <div class="section-label">Commander Castability</div>
-        <p class="muted" style="font-size:12px">
-          Import deck to fetch Scryfall data and see castability analysis.
-        </p>
-      </div>`;
+      <div class="section-label" style="display:flex;align-items:center;gap:8px">
+        Commander Castability
+      </div>
+      <p class="muted" style="font-size:12px">
+        Import deck to fetch Scryfall data and see castability analysis.
+      </p>`;
   }
 
   if (tagsStatus === 'pending') {
     return `
-      <div class="section">
-        <div class="section-label">Commander Castability</div>
-        <div class="tags-loading-state">
-          <span class="tags-loading-spinner"></span>
-          <span class="muted" style="font-size:12px">Fetching oracle tags…</span>
-        </div>
+      <div class="section-label" style="display:flex;align-items:center;gap:8px">
+        Commander Castability
+      </div>
+      <div class="tags-loading-state">
+        <span class="tags-loading-spinner"></span>
+        <span class="muted" style="font-size:12px">Fetching oracle tags…</span>
       </div>`;
   }
 
   if (tagsStatus === 'failed') {
     return `
-      <div class="section">
-        <div class="section-label">Commander Castability</div>
-        <p class="muted" style="font-size:12px">
-          Oracle tag fetch timed out or failed — castability requires ramp data from Scryfall Tagger.
-          Try re-importing the deck.
-        </p>
-      </div>`;
-  }
-
-  return `
-    <div class="section">
-      <div class="section-label" style="display:flex;align-items:center;gap:10px">
+      <div class="section-label" style="display:flex;align-items:center;gap:8px">
         Commander Castability
       </div>
-      ${buildCastabilityBody(profile)}
-    </div>`;
-}
-
-/** Inner chart + stats HTML, shared between the normal and tag-failed render paths. */
-function buildCastabilityBody(profile) {
-  const { commander, commanderCmc, commanderColors, colorSources,
-          N, landCount, untappedLandCount, tappedLandCount,
-          rampCount, rampBuckets, nonCmdrCards } = profile;
-
-  // Debug: log ramp buckets and otags
-  console.log('[castability] commander:', commander.name, 'CMC:', commanderCmc);
-  console.log('[castability] ramp buckets:', rampBuckets.map(b =>
-    `CMC=${b.cmc} ${b.isDork ? 'dork' : 'rock'} ×${b.count} val=${b.value.toFixed(2)} cast=${(b.castability * 100).toFixed(0)}%`
-  ).join(' | ') || '(none)');
-  if (commander.otags?.length) {
-    console.log('[castability] commander otags:', commander.otags.join(', '));
+      <p class="muted" style="font-size:12px">
+        Oracle tag fetch timed out or failed — castability requires ramp data from Scryfall Tagger.
+        Try re-importing the deck.
+      </p>`;
   }
+
+  // Compute badge
+  const _turns = [1, 2, 3, 4, 5, 6, 7, 8];
+  const _probs = _turns.map(T => pCastOnTurn(T, profile));
+  const _thresh80 = _turns.find(T => Math.round(_probs[T - 1] * 100) >= 80) ?? null;
+  const _badgeDelta = _thresh80 === null ? Infinity : _thresh80 - commanderCmc;
+  const _badgeClass = _badgeDelta <= 0 ? 'good' : _badgeDelta === 1 ? 'warn' : 'bad';
+  const _badgeText  = _thresh80 ? `Turn ${_thresh80}` : 'Turn 9+';
+
+  const { untappedLandCount, rampBuckets: rb, nonCmdrCards } = profile;
 
   // Turn probabilities T1..T8
   const turns = [1, 2, 3, 4, 5, 6, 7, 8];
   const probs = turns.map(T => pCastOnTurn(T, profile));
 
-  // 80% threshold turn — compare to commander CMC for badge color
-  const thresh80  = turns.find(T => Math.round(probs[T - 1] * 100) >= 80) ?? null;
-  const badgeDelta = thresh80 === null ? Infinity : thresh80 - commanderCmc;
-  const badgeClass = badgeDelta <= 0 ? 'good' : badgeDelta === 1 ? 'warn' : 'bad';
-  const badgeText  = thresh80 ? `Turn ${thresh80}` : 'Turn 9+';
-
-  // Bar chart
   const maxProb = Math.max(...probs, 0.01);
   const bars = turns.map((T, i) => {
     const pct = probs[i];
@@ -523,65 +554,167 @@ function buildCastabilityBody(profile) {
     return `
       <div class="mc-col" title="Turn ${T}: ${(pct * 100).toFixed(1)}%">
         <div class="mc-col-bar-wrap">
-          <div class="mc-col-bar" style="height:${barH}%;background:${color}"></div>
+          <div class="mc-col-bar" style="height:${barH}%;background:${color}">
+            <span class="mc-col-count mc-col-count--above" style="color:${color}">${(pct * 100).toFixed(0)}%</span>
+          </div>
         </div>
-        <div class="mc-col-count" style="color:${color}">${(pct * 100).toFixed(0)}%</div>
         <div class="mc-col-label">T${T}</div>
       </div>`;
   }).join('');
 
-  // Combined color probability for multi-color commanders (inclusion-exclusion)
-  const n = 7 + commanderCmc;
-  const pColorsExact = pAllColors(commanderColors, nonCmdrCards, N, n);
-
-  // Color source rows — show both per-color independent P and the combined joint P
-  const colorRows = commanderColors.map(c => {
-    const sources = colorSources[c] ?? 0;
-    const pBy = (hypgeomAtLeast(1, N, sources, n) * 100).toFixed(0);
-    const ok = sources >= 14;
-    const color = ok ? 'var(--green)' : sources >= 10 ? 'var(--yellow)' : 'var(--red)';
-    return `
-      <div class="color-source-row">
-        <span class="color-pip color-pip--${c}">${c}</span>
-        <span style="font-size:12px">${sources} sources</span>
-        <span class="muted" style="font-size:11px">P(≥1 by T${commanderCmc}): <span style="color:${color}">${pBy}%</span></span>
-        ${sources < 14 ? `<span style="color:var(--yellow);font-size:10px">↑ Karsten recommends ≥14</span>` : ''}
-      </div>`;
-  }).join('');
-
-  // Joint color probability line for multi-color commanders
-  const jointColorLine = commanderColors.length >= 2
-    ? `<div class="color-source-row" style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px">
-        <span style="font-size:12px;font-weight:500">All ${commanderColors.length} colors</span>
-        <span class="muted" style="font-size:11px">P(all by T${commanderCmc}): <span style="color:${pColorsExact >= 0.80 ? 'var(--green)' : pColorsExact >= 0.60 ? 'var(--yellow)' : 'var(--red)'}">${(pColorsExact * 100).toFixed(0)}%</span></span>
-      </div>`
-    : '';
-
-  const tappedNote = tappedLandCount > 0
-    ? `<p class="muted" style="font-size:10px;margin-top:4px">
-        ${tappedLandCount} of ${landCount} lands enter tapped (modeled: play tapped early, untapped on curve turn).
-       </p>`
-    : '';
-
-  // Bucket summary line for UI
+  // Info text
   const bucketSummary = rampBuckets.length > 0
     ? rampBuckets.map(b => `${b.count}× CMC${b.cmc} ${b.isDork ? 'dork' : 'rock'}(${b.value.toFixed(1)}, ${(b.castability * 100).toFixed(0)}% castable)`).join(', ')
     : 'no ramp detected';
-
   const landLabel = tappedLandCount > 0
     ? `${untappedLandCount}+${tappedLandCount} tapped lands`
     : `${landCount} lands`;
+  _castInfoText = [
+    `Probability of having enough mana + the right colors to cast your commander on each turn.`,
+    ``,
+    `Factors included:`,
+    `• Lands: ${landLabel} (tapped lands modeled as 1-turn delay)`,
+    `• Ramp: ${rampCount} pieces — mana rocks (tap same turn for net mana), mana dorks (tap turn after), and rituals (burst mana on cast turn)`,
+    `• Colors: inclusion-exclusion over all required pips; dual/tri-color lands satisfy multiple colors simultaneously`,
+    ``,
+    `Ramp detection uses Moxfield categories (#mana-rock, #mana-dork, #ramp) and oracle text patterns. These are estimates based on opening hand draw probability and do not model advanced board states.`,
+    ``,
+    `Ramp details: ${bucketSummary}`,
+  ].join('\n');
+
+  // Recommendation line: what would it take to reach 80% on curve?
+  const onCurveP = probs[commanderCmc - 1] ?? 0;
+  let recLine = '';
+  if (commanderCmc >= 1 && commanderCmc <= 8 && Math.round(onCurveP * 100) < 80) {
+    // Try adding hypothetical untapped lands until 80% is hit
+    let extraNeeded = null;
+    for (let extra = 1; extra <= 30; extra++) {
+      const modProfile = {
+        ...profile,
+        N: N + extra,
+        landCount: landCount + extra,
+        untappedLandCount: (profile.untappedLandCount ?? landCount) + extra,
+      };
+      const p = pCastOnTurn(commanderCmc, modProfile);
+      if (Math.round(p * 100) >= 80) { extraNeeded = extra; break; }
+    }
+
+    // Find weakest color (lowest P(≥1 source) at curve turn draws)
+    const curveDraw = 7 + commanderCmc;
+    let weakestColor = null;
+    let weakestP = 1;
+    for (const c of commanderColors) {
+      const src = profile.landColorSources?.[c] ?? 0;
+      const p = src > 0 ? hypgeomAtLeast(1, N, src, curveDraw) : 0;
+      if (p < weakestP) { weakestP = p; weakestColor = c; }
+    }
+
+    const parts = [];
+    if (extraNeeded !== null) {
+      parts.push(`+${extraNeeded} mana source${extraNeeded > 1 ? 's' : ''} for 80% on turn ${commanderCmc}`);
+    } else {
+      parts.push(`80% on curve may require significant changes`);
+    }
+    if (weakestColor && weakestP < 0.80) {
+      const COLOR_NAMES = { W: 'white', U: 'blue', B: 'black', R: 'red', G: 'green' };
+      parts.push(`${COLOR_NAMES[weakestColor] ?? weakestColor} is your weakest color (${(weakestP * 100).toFixed(0)}%)`);
+    }
+    recLine = `<div class="cast-rec-line">${parts.join(' · ')}</div>`;
+  }
 
   return `
-    <span class="cast-threshold-badge cast-threshold-badge--${badgeClass}" style="margin-bottom:6px;display:inline-block">80% by ${badgeText}</span>
-    <p class="muted" style="font-size:11px;margin-bottom:8px">
-      ${escapeHtml(commander.name)} · CMC ${commanderCmc} ·
-      ${landLabel} + ${rampCount} ramp
-    </p>
-    <p class="muted" style="font-size:10px;margin-bottom:8px">Ramp: ${escapeHtml(bucketSummary)}</p>
-    <div class="mc-col-chart" style="height:80px">${bars}</div>
-    ${tappedNote}
-    ${commanderColors.length > 0 ? `<div style="margin-top:10px">${colorRows}${jointColorLine}</div>` : ''}`;
+    <div class="section-label" style="display:flex;align-items:center;gap:8px">
+      Commander Castability
+      <span class="cast-threshold-badge cast-threshold-badge--${_badgeClass}">80% by ${_badgeText}</span>
+      <button class="info-icon-btn" onclick="window.__cast.showInfo()" title="Calculation details">ℹ</button>
+    </div>
+    <div class="mc-col-chart mc-col-chart--cast">${bars}</div>
+    ${recLine}`;
+}
+
+/** Mana analysis — color sources by turn. No dependency on tags/ramp. */
+export function buildManaAnalysisSection(profile) {
+  const colorAnalysis = buildColorByTurnRows(profile);
+  if (!colorAnalysis) return '';
+  return `
+    <div class="section-label">Mana Analysis</div>
+    ${colorAnalysis}`;
+}
+
+/** Color source analysis with per-turn picker and "+X more for 80%" recommendations. */
+function buildColorByTurnRows(profile) {
+  const { commanderColorIdentity, commanderColors, commanderCmc, landColorSources, nonCmdrCards, N } = profile;
+  const WUBRG = ['W', 'U', 'B', 'R', 'G'];
+  const rawColors = commanderColorIdentity ?? commanderColors;
+  const colors = [...rawColors].sort((a, b) => WUBRG.indexOf(a) - WUBRG.indexOf(b));
+  if (!colors.length) return '';
+
+  const selectedT = _colorTurn ?? commanderCmc;
+
+  // Turn stepper with +/− buttons
+  const pickerRow = `
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:8px">
+      <span class="muted" style="font-size:10px;white-space:nowrap">by turn</span>
+      <div class="calc-stepper">
+        <button class="calc-stepper-btn" onclick="window.__cast.setColorTurn(Math.max(1,${selectedT}-1))">−</button>
+        <span class="calc-stepper-value">${selectedT}</span>
+        <button class="calc-stepper-btn" onclick="window.__cast.setColorTurn(Math.min(15,${selectedT}+1))">+</button>
+      </div>
+    </div>`;
+
+  const n = 7 + selectedT; // cards in hand on turn selectedT
+
+  // Minimum sources for 80% P(≥1 in n draws)
+  function sourcesFor80(N, n) {
+    for (let k = 1; k <= N; k++) {
+      if (hypgeomAtLeast(1, N, k, n) >= 0.80) return k;
+    }
+    return Infinity;
+  }
+
+  // Per-color rows — land sources only (rocks/dorks need casting first)
+  const colorRows = colors.map(c => {
+    const sources = landColorSources[c] ?? 0;
+    const pBy = hypgeomAtLeast(1, N, sources, n);
+    const pct = (pBy * 100).toFixed(0);
+    const pctColor = pBy >= 0.80 ? 'var(--green)' : pBy >= 0.50 ? 'var(--yellow)' : 'var(--red)';
+    const needed = sourcesFor80(N, n);
+    const extra = needed === Infinity ? null : Math.max(0, needed - sources);
+    // Only show recommendation when not already at 80%
+    const recText = extra && extra > 0
+      ? `<span style="color:var(--yellow);font-size:10px">+${extra} for 80%</span>`
+      : '';
+    return `
+      <div class="color-source-row">
+        <span class="color-pip color-pip--${c}">${c}</span>
+        <span style="font-size:11px">${sources} lands</span>
+        <span style="font-size:11px;color:${pctColor}">${pct}%</span>
+        ${recText}
+      </div>`;
+  }).join('');
+
+  // All-colors joint row — land sources only (consistent with per-color rows)
+  // Pass ALL cards so non-lands are counted as non-producers in the hypergeometric model,
+  // but strip producedMana from non-lands so only land color sources are counted.
+  const landOnlyColorCards = nonCmdrCards.map(c =>
+    c.types?.includes('Land') ? c : { ...c, producedMana: [] }
+  );
+  const pAllJoint = commanderColors.length >= 2
+    ? pAllColors(commanderColors, landOnlyColorCards, N, n) : null;
+  const allColorsRow = pAllJoint !== null ? (() => {
+    const allPct = (pAllJoint * 100).toFixed(0);
+    const allColor = pAllJoint >= 0.80 ? 'var(--green)' : pAllJoint >= 0.50 ? 'var(--yellow)' : 'var(--red)';
+    return `
+    <div class="color-source-row" style="margin-top:4px;border-top:1px solid var(--border);padding-top:4px">
+      <span class="color-pip-spacer"></span>
+      <span style="font-size:11px;font-weight:500">All ${commanderColors.length}c</span>
+      <span style="font-size:11px;color:${allColor}">${allPct}%</span>
+    </div>`;
+  })() : '';
+
+  return `
+    ${pickerRow}
+    <div>${colorRows}${allColorsRow}</div>`;
 }
 
 // ─── Effect Lab: Sub-tab Bar ──────────────────────────────────────────────────
@@ -596,11 +729,177 @@ function buildSubTabBar() {
     </div>`;
 }
 
-function buildCascadeTab() {
+function buildCascadeTab(deck) {
+  const allCards = deck.cards.filter(c => !c.isCommander);
+  const mv = _cascadeMV;
+  const mode = _cascadeMode;
+  const profile = extractDeckProfile(deck);
+
+  // Cascade: non-land cards with CMC strictly less than MV
+  // Discover: non-land cards with CMC less than or equal to MV
+  const isHit = mode === 'cascade'
+    ? c => !c.types?.includes('Land') && (c.cmc ?? 0) < mv
+    : c => !c.types?.includes('Land') && (c.cmc ?? 0) <= mv;
+  const hits = allCards.filter(isHit);
+  const totalHits = hits.reduce((s, c) => s + c.quantity, 0);
+
+  const modeLabel = mode === 'cascade' ? 'Cascade' : 'Discover';
+  const mvCompare = mode === 'cascade' ? '<' : '≤';
+
+  // Mode toggle
+  const modeToggle = `
+    <div class="view-toggle" style="margin-bottom:10px">
+      <button class="view-toggle-btn ${mode === 'cascade' ? 'view-toggle-btn--active' : ''}"
+        onclick="window.__cascade.setMode('cascade')">Cascade</button>
+      <button class="view-toggle-btn ${mode === 'discover' ? 'view-toggle-btn--active' : ''}"
+        onclick="window.__cascade.setMode('discover')">Discover</button>
+    </div>`;
+
+  // MV stepper
+  const mvStepper = `
+    <div style="display:flex;align-items:center;gap:6px;margin-bottom:12px">
+      <span class="muted" style="font-size:11px;white-space:nowrap">MV</span>
+      <div class="calc-stepper">
+        <button class="calc-stepper-btn" onclick="window.__cascade.setMV(Math.max(1,${mv}-1))">−</button>
+        <span class="calc-stepper-value">${mv}</span>
+        <button class="calc-stepper-btn" onclick="window.__cascade.setMV(Math.min(16,${mv}+1))">+</button>
+      </div>
+      <span class="muted" style="font-size:11px">non-land with CMC ${mvCompare} ${mv}</span>
+    </div>`;
+
+  // ── Breakdown: Type or Tag view ──────────────────────────────────────────────
+  const isTypeView = _cascadeFilter !== 'tag';
+
+  const filterToggle = `
+    <div class="view-toggle" style="margin-bottom:6px">
+      <button class="view-toggle-btn ${isTypeView ? 'view-toggle-btn--active' : ''}"
+        onclick="window.__cascade.setFilter(null)">Type</button>
+      <button class="view-toggle-btn ${!isTypeView ? 'view-toggle-btn--active' : ''}"
+        onclick="window.__cascade.setFilter('tag')">Tag</button>
+    </div>`;
+
+  const sortToggle = `
+    <div class="view-toggle" style="margin-bottom:6px">
+      <button class="view-toggle-btn ${_cascadeSort === 'value' ? 'view-toggle-btn--active' : ''}"
+        onclick="window.__cascade.setSort('value')">Value</button>
+      <button class="view-toggle-btn ${_cascadeSort === 'alpha' ? 'view-toggle-btn--active' : ''}"
+        onclick="window.__cascade.setSort('alpha')">Alpha</button>
+    </div>`;
+
+  let breakdownEntries;
+  if (isTypeView) {
+    const typeCounts = {};
+    for (const card of hits) {
+      const type = CARD_TYPES.find(t => t !== 'MDFC' && card.types?.includes(t)) || 'Other';
+      typeCounts[type] = (typeCounts[type] || 0) + card.quantity;
+    }
+    breakdownEntries = CARD_TYPES
+      .filter(t => t !== 'MDFC' && t !== 'Unknown' && (typeCounts[t] || 0) > 0)
+      .map(t => ({ label: t, count: typeCounts[t], color: TYPE_COLORS[t] || TYPE_COLORS.Other || '#6b7280' }));
+  } else {
+    const tagCounts = {};
+    for (const card of hits) {
+      const tags = card.moxTags || [];
+      if (!tags.length) {
+        tagCounts['(untagged)'] = (tagCounts['(untagged)'] || 0) + card.quantity;
+      } else {
+        for (const tag of tags) {
+          tagCounts[tag] = (tagCounts[tag] || 0) + card.quantity;
+        }
+      }
+    }
+    breakdownEntries = Object.entries(tagCounts).map(([tag, count]) => ({
+      label: tag,
+      count,
+      color: tag === '(untagged)' ? '#6b7280' : tagColor(tag),
+    }));
+  }
+
+  // Sort
+  breakdownEntries = _cascadeSort === 'alpha'
+    ? [...breakdownEntries].sort((a, b) => a.label.localeCompare(b.label))
+    : [...breakdownEntries].sort((a, b) => b.count - a.count);
+
+  const maxCount = Math.max(1, ...breakdownEntries.map(e => e.count));
+  const breakdownRows = breakdownEntries.map(({ label, count, color }) => {
+    const pct = totalHits > 0 ? (count / totalHits * 100) : 0;
+    const barPct = Math.round((count / maxCount) * 100);
+    return `
+      <div class="hand-chart-row">
+        <div class="hand-chart-label">
+          <span class="legend-dot" style="background:${color}"></span>
+          ${escapeHtml(label)}
+        </div>
+        <div class="hand-chart-bar-track">
+          <div class="hand-chart-bar" style="width:${barPct}%;background:${color}"></div>
+        </div>
+        <div class="hand-chart-value">${count} <span class="muted" style="font-size:10px">(${pct.toFixed(0)}%)</span></div>
+      </div>`;
+  }).join('');
+
+  const breakdownChart = totalHits > 0
+    ? `<div class="hand-chart">${breakdownRows}</div>`
+    : `<p class="muted" style="font-size:11px">No valid targets at MV ${mvCompare} ${mv}.</p>`;
+
+  // ── Sample card pile (overlapping stack like overview tab) ────────────────────
+  const sampleSize = Math.min(15, hits.length);
+  const shuffled = [...hits].sort(() => Math.random() - 0.5);
+  const sample = shuffled.slice(0, sampleSize);
+
+  const sampleCards = sample.map((card, idx) => {
+    const isLast = idx === sample.length - 1;
+    const imgUrl = escapeHtml(card.imageUrl || '');
+    const tags = card.moxTags || [];
+    const tagsAttr = JSON.stringify(tags).replace(/"/g, '&quot;');
+    const castPct = computeCardCastability(card, profile);
+    const castAttr = castPct !== null ? ` data-castability="${Math.round(castPct * 100)}"` : '';
+
+    if (card.imageUrl) {
+      return `
+        <div class="card-stack-item cascade-stack-item${isLast ? ' card-stack-item--last' : ''}"
+          data-image-url="${imgUrl}"
+          data-tags="${tagsAttr}"${castAttr}
+          onmouseenter="window.__pileCard?.show(this.dataset.imageUrl, this); window.__preview?.showTagsWithMeta(JSON.parse(this.dataset.tags || '[]'), this.dataset.castability ? {label:'On curve',value:this.dataset.castability+'%'} : null, this)"
+          onmouseleave="window.__pileCard?.hide(); window.__preview?.hide()">
+          <img src="${imgUrl}" alt="${escapeHtml(card.name)}" loading="lazy" />
+        </div>`;
+    }
+    return `
+      <div class="card-stack-item card-stack-item--noimage cascade-stack-item${isLast ? ' card-stack-item--last' : ''}"
+        data-tags="${tagsAttr}"${castAttr}
+        onmouseenter="window.__preview?.showTagsWithMeta(JSON.parse(this.dataset.tags || '[]'), this.dataset.castability ? {label:'On curve',value:this.dataset.castability+'%'} : null, this)"
+        onmouseleave="window.__preview?.hide()">
+        <span class="card-stack-name">${escapeHtml(card.name)}</span>
+      </div>`;
+  }).join('');
+
+  const sampleHTML = totalHits > 0
+    ? `<div class="cascade-card-pile">${sampleCards}</div>`
+    : `<p class="muted" style="font-size:11px">No targets to sample.</p>`;
+
   return `
     <div class="section">
-      <div class="section-label">Cascade / Discover</div>
-      <p class="muted" style="font-size:12px">Cascade and Discover analysis coming soon.</p>
+      <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+        ${modeToggle}
+      </div>
+      ${mvStepper}
+      <div class="muted" style="font-size:11px;margin-bottom:16px">
+        ${totalHits} valid ${modeLabel.toLowerCase()} target${totalHits !== 1 ? 's' : ''} in deck (non-land, CMC ${mvCompare} ${mv})
+      </div>
+      <div class="cast-mana-row">
+        <div class="cast-mana-col">
+          <div class="section-label">Target Breakdown</div>
+          <div class="card-browser-controls">${filterToggle}${sortToggle}</div>
+          ${breakdownChart}
+        </div>
+        <div class="cast-mana-col">
+          <div class="section-label" style="display:flex;align-items:center;gap:8px">
+            Sample Targets
+            <button class="btn-secondary btn-sm" style="padding:1px 8px;font-size:10px" onclick="window.__cascade.resample()">Resample</button>
+          </div>
+          ${sampleHTML}
+        </div>
+      </div>
     </div>`;
 }
 

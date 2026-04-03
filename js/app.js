@@ -11,8 +11,9 @@ import { runSimulation, flattenDeck } from './simulator.js';
 import {
   addDeck, removeDeck, addResults,
   getDeckById, getResultsForDeck, saveToFile, loadFromFile,
-  updateDeckGoodHandDefs, removeGoodHandDef,
+  updateDeckGoodHandDefs, removeGoodHandDef, setDeckGoodHandDefsAll,
   updateDeckDiscardPriorities,
+  updateDeckCards, updateDeckTagsStatus,
   renameDeck,
   clearResultsForDeck,
   updateEffectDef, removeEffectDef,
@@ -27,6 +28,8 @@ import { enrichDeckWithScryfall, enrichTagsForDeck } from './enrichment.js';
 import {
   setLabN, setLabTarget,
   setActiveSubTab, setEffectOpen,
+  setColorTurn, getCastInfoText,
+  setCascadeMV, setCascadeMode, setCascadeSort, setCascadeFilter,
   matchingCardsForEffect, matchingCardsForCriterion,
   buildNSensGraph, buildSrcSensGraph,
 } from './ui/calculate-tab.js';
@@ -163,13 +166,13 @@ async function runTagEnrichment(deckId, deckPhase1) {
     );
     const live = getDeckById(deckId);
     if (!live) return; // deck was removed while tags were loading
-    live.cards      = deckWithTags.cards;
-    live.tagsStatus = deckWithTags.tagsStatus;
-    delete live._enrichmentMap;
+    if (activeDeckId !== deckId) return; // user switched decks — discard stale enrichment
+    updateDeckCards(deckId, deckWithTags.cards);
+    updateDeckTagsStatus(deckId, deckWithTags.tagsStatus);
     refresh();
   } catch (err) {
     const live = getDeckById(deckId);
-    if (live) { live.tagsStatus = 'failed'; delete live._enrichmentMap; }
+    if (live) { updateDeckTagsStatus(deckId, 'failed'); }
     showToast('Oracle tag fetch timed out or failed — castability unavailable.', 'warn');
     refresh();
   }
@@ -449,6 +452,13 @@ function freshCriterion() {
 
 window.__ghh = {
 
+  showInfo() {
+    showConfirmModal(
+      'Define what makes a hand worth keeping. The simulator checks each definition in order and keeps the first match.<br><br>If a definition\'s criteria can be satisfied by fewer cards than the hand size, it auto-applies at that mull depth.',
+      () => {}, { title: 'Keep Conditions', confirmLabel: 'Close' }
+    );
+  },
+
   addDef() {
     const deck = getDeckById(activeDeckId);
     const hasNoDefs = !deck?.goodHandDefs?.length;
@@ -659,8 +669,7 @@ window.__ghh = {
     const defs = [...deck.goodHandDefs];
     const [moved] = defs.splice(this._dragSrc, 1);
     defs.splice(targetIdx, 0, moved);
-    // Direct mutation — getDeckById returns the live appState reference
-    deck.goodHandDefs = defs;
+    setDeckGoodHandDefsAll(activeDeckId, defs);
     this._dragSrc = null;
     refresh();
   },
@@ -673,6 +682,13 @@ window.__ghh = {
 
 window.__disc = {
   _dragSrc: null,
+
+  showInfo() {
+    showConfirmModal(
+      'When mulliganing to 6/5/4, cards are put back according to these rules (top-to-bottom, first match wins).<br><br>The default fallback puts back the highest CMC card of any type.',
+      () => {}, { title: 'Bottom Selection', confirmLabel: 'Close' }
+    );
+  },
 
   toggleBottom(v) { setBottomOpen(v); },
 
@@ -763,6 +779,25 @@ window.__disc = {
 
 // ─── Card Image Preview ───────────────────────────────────────────────────────
 
+// Track last mouse position so we can re-check hover after accordion opens
+let _lastMouseX = 0;
+let _lastMouseY = 0;
+
+// After a re-render (e.g. accordion toggle), trigger the hover preview if the
+// mouse is already over a card-stack-item without needing to move the cursor.
+function checkCardHover() {
+  const el = document.elementFromPoint(_lastMouseX, _lastMouseY);
+  if (!el) return;
+  const card = el.closest('[data-tags]');
+  if (!card) return;
+  const tags = JSON.parse(card.dataset.tags || '[]');
+  const meta = card.dataset.castability
+    ? { label: 'On curve', value: card.dataset.castability + '%' }
+    : null;
+  if (card.dataset.imageUrl) window.__pileCard?.show(card.dataset.imageUrl, card);
+  window.__preview?.showTagsWithMeta(tags, meta, card);
+}
+
 {
   const _previewEl      = document.getElementById('card-image-preview');
   const _previewImg     = document.getElementById('card-image-preview-img');
@@ -834,6 +869,40 @@ window.__disc = {
         _anchored = false;
       }
     },
+    // Like showTags but also renders an optional meta pill inline with tags.
+    showTagsWithMeta(tags = [], meta = null, anchorEl = null) {
+      if (_locked || !_previewEl) return;
+      if (_previewImg) { _previewImg.src = ''; _previewImg.style.display = 'none'; }
+      if (_previewImgBack) { _previewImgBack.src = ''; _previewImgBack.style.display = 'none'; }
+      _previewEl.classList.remove('dual');
+      // Remove any leftover standalone meta line from old renders
+      const oldMeta = _previewEl.querySelector('.preview-meta-line');
+      if (oldMeta) oldMeta.style.display = 'none';
+      // Render tags + meta pill together inside the tags container
+      if (_previewTags) {
+        const sorted = [...(tags || [])].sort((a, b) => a.localeCompare(b));
+        const tagPills = sorted.map(t =>
+          `<span class="preview-tag-pill">${t.replace(/&/g,'&amp;').replace(/</g,'&lt;')}</span>`
+        ).join('');
+        let metaPill = '';
+        if (meta) {
+          const pct = parseInt(meta.value, 10);
+          const cls = pct >= 80 ? 'preview-tag-pill--meta-good'
+            : pct >= 50 ? 'preview-tag-pill--meta-warn' : 'preview-tag-pill--meta-bad';
+          metaPill = `<span class="preview-tag-pill ${cls}">${meta.label}: ${meta.value}</span>`;
+        }
+        _previewTags.innerHTML = tagPills + metaPill;
+        _previewTags.style.display = (sorted.length || meta) ? 'flex' : 'none';
+      }
+      if (!tags.length && !meta) { _previewEl.style.display = 'none'; return; }
+      _previewEl.style.display = 'flex';
+      if (anchorEl) {
+        _anchored = true;
+        _positionAtElement(anchorEl, 160);
+      } else {
+        _anchored = false;
+      }
+    },
     hide() {
       if (_previewEl) {
         _previewEl.style.display = 'none';
@@ -855,6 +924,8 @@ window.__disc = {
 
   // Follow cursor unless pinned to a pile card.
   document.addEventListener('mousemove', e => {
+    _lastMouseX = e.clientX;
+    _lastMouseY = e.clientY;
     if (!_previewEl || _previewEl.style.display === 'none' || _anchored) return;
     const w = _previewEl.offsetWidth || 220;
     const h = _previewEl.offsetHeight || 310;
@@ -922,6 +993,7 @@ window.__ovr = {
     expandedTypeGroups.clear();
     if (!wasOpen) expandedTypeGroups.add(label);
     refresh();
+    requestAnimationFrame(checkCardHover);
   },
   // Switch between 'types' and 'tags' grouping in the card browser.
   setView(view) {
@@ -1124,7 +1196,46 @@ function _calcUpdateGraphsInDom(defId) {
     pctChip.textContent = K > 0 ? currentPct + '%' : '—';
     pctChip.className = `def-pct ${pctClass}`;
   }
+
+  // Update per-criterion K badges inside the criteria editor
+  const criteria = def.criteria || [];
+  const critRows = section?.querySelectorAll('.calc-criterion-container .criterion-row');
+  if (critRows) {
+    critRows.forEach((row, idx) => {
+      if (idx >= criteria.length) return;
+      const critK = matchingCardsForCriterion(deck, criteria[idx]).reduce((s, c) => s + c.quantity, 0);
+      const badge = row.querySelector('.def-pct');
+      if (badge) {
+        badge.textContent = String(critK);
+        badge.className = `def-pct ${critK > 0 ? 'def-pct--good' : 'def-pct--none'}`;
+        badge.style.fontSize = '10px';
+        badge.style.padding = '1px 5px';
+      }
+    });
+  }
 }
+
+// ─── Commander Castability ────────────────────────────────────────────────────
+
+window.__cast = {
+  setColorTurn(t) { setColorTurn(t); refresh(); },
+  showInfo() {
+    const text = getCastInfoText();
+    showConfirmModal(text.replace(/\n/g, '<br>'), () => {}, {
+      title: 'Castability Calculation',
+      confirmLabel: 'Close',
+    });
+  },
+};
+
+window.__sim = {
+  showInfo() {
+    showConfirmModal(
+      'Runs 100,000 London Mulligan simulations and evaluates your keep conditions.<br><br>Each game draws an opening hand, checks keep conditions in priority order, and mulligans if no condition matches (down to 1 card).',
+      () => {}, { title: 'Simulation', confirmLabel: 'Close' }
+    );
+  },
+};
 
 window.__calc = {
   // ── Legacy (kept for backward compat) ──────────────────────────────────────
@@ -1301,6 +1412,14 @@ window.__calc = {
     if (!cards.length) { showToast('No cards match this criterion.', 'info'); return; }
     showCardListModal('Sample — Criterion Matches', cards);
   },
+};
+
+window.__cascade = {
+  setMode(m)   { setCascadeMode(m);   refresh(); },
+  setMV(n)     { setCascadeMV(n);     refresh(); },
+  setSort(s)   { setCascadeSort(s);   refresh(); },
+  setFilter(f) { setCascadeFilter(f); refresh(); },
+  resample()   { refresh(); }, // re-render shuffles sample
 };
 
 window.__deck = {
