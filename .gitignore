@@ -1,2 +1,4 @@
 old-chat.txt
 .DS_Store
+firebase/functions/node_modules/
+firebase/.firebase/

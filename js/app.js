@@ -147,10 +147,11 @@ function refresh() {
 
 const MOXFIELD_URL_RE = /moxfield\.com\/decks\/([\w-]+)/i;
 
-// Moxfield's API doesn't set CORS headers, so browsers block direct fetches.
-// corsproxy.io proxies the request server-side and adds CORS headers for us.
-// Swap this constant if a self-hosted proxy is added later.
-const CORS_PROXY = 'https://corsproxy.io/?url=';
+// Moxfield API calls are proxied through our Firebase Cloud Function,
+// which handles CORS, rate limiting (Cloud Tasks queue), and the required user agent.
+const MOXFIELD_PROXY = 'https://us-central1-mull-stat.cloudfunctions.net/enqueueMoxfieldDeck';
+const IS_LOCAL = location.hostname === 'localhost' || location.hostname === '127.0.0.1';
+function dlog(...args) { if (IS_LOCAL) console.log('[moxfield-proxy]', ...args); }
 
 /**
  * Run oracle-tag enrichment for a deck in the background.
@@ -161,7 +162,7 @@ async function runTagEnrichment(deckId, deckPhase1) {
   try {
     const deckWithTags = await enrichTagsForDeck(
       deckPhase1,
-      msg => console.log('[tags]', msg),
+      msg => dlog('[tags]', msg),
       msg => showToast(msg, 'warn'),
     );
     const live = getDeckById(deckId);
@@ -179,6 +180,7 @@ async function runTagEnrichment(deckId, deckPhase1) {
 }
 
 function logEnrichedDeck(deck) {
+  if (!IS_LOCAL) return;
   const total = deck.cards.reduce((s, c) => s + c.quantity, 0);
   console.groupCollapsed(`[mullstat] Enriched deck: "${deck.name}" — ${deck.cards.length} unique / ${total} total`);
   console.table(deck.cards.map(c => ({
@@ -232,23 +234,24 @@ function bindImportPanel() {
       importBtn.textContent = '· Fetching…';
 
       try {
-        // Append timestamp so corsproxy.io sees a unique URL each import (bypasses proxy cache)
-        const apiUrl = `https://api2.moxfield.com/v2/decks/all/${publicId}?_t=${Date.now()}`;
-        const res = await fetch(CORS_PROXY + encodeURIComponent(apiUrl), { cache: 'no-store' });
+        dlog(`Fetching deck ${publicId} via Firebase proxy...`);
+        const fetchStart = performance.now();
+        const res = await fetch(`${MOXFIELD_PROXY}?deckId=${encodeURIComponent(publicId)}`, { cache: 'no-store' });
+        dlog(`Proxy responded: HTTP ${res.status} (${((performance.now() - fetchStart) / 1000).toFixed(1)}s)`);
         if (!res.ok) throw new Error(`Moxfield returned HTTP ${res.status}`);
 
         const apiData = await res.json();
+        dlog(`Received deck JSON: ${JSON.stringify(apiData).length} bytes`);
 
         const mainboardEntries = Object.values(apiData.mainboard || {});
         const { deck, errors } = parseMoxfieldApiResponse(apiData, name);
         const noTypeLine = mainboardEntries.filter(e => !e.card?.type_line);
-        if (noTypeLine.length) console.warn('[mullstat] Moxfield entries with missing type_line:', noTypeLine.map(e => e.card?.name));
+        if (noTypeLine.length) dlog('Moxfield entries with missing type_line:', noTypeLine.map(e => e.card?.name));
         const taggedCards = deck.cards.filter(c => c.moxTags?.length > 0);
-        console.log(`[mullstat] Moxfield: parsed ${deck.cards.length} unique cards (${mainboardEntries.reduce((s, e) => s + (e.quantity || 1), 0)} total), ${taggedCards.length} with tags`);
+        dlog(`Parsed ${deck.cards.length} unique cards (${mainboardEntries.reduce((s, e) => s + (e.quantity || 1), 0)} total), ${taggedCards.length} with tags`);
         if (taggedCards.length === 0 && mainboardEntries.length > 0) {
-          // Log a sample entry to inspect the API structure if no tags were found
           const sample = mainboardEntries.find(e => e.tags?.length) ?? mainboardEntries[0];
-          console.log('[mullstat] Sample mainboard entry (checking for tags field):', sample);
+          dlog('Sample mainboard entry (checking for tags field):', sample);
         }
 
         errors.forEach(e => showToast(e, 'warn'));
@@ -282,9 +285,14 @@ function bindImportPanel() {
       } catch (err) {
         showToast(`Moxfield fetch failed: ${err.message}`, 'error');
         setImportLoading(false);
-      } finally {
         importBtn.disabled = false;
-        importBtn.textContent = 'Import';
+        importBtn.textContent = 'Retry Import';
+        return;
+      } finally {
+        if (importBtn.textContent !== 'Retry Import') {
+          importBtn.disabled = false;
+          importBtn.textContent = 'Import';
+        }
       }
 
     } else {

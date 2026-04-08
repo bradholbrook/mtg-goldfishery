@@ -1,0 +1,10 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    {
+      "collectionGroup": "moxfield-requests",
+      "fieldPath": "data",
+      "indexes": []
+    }
+  ]
+}
