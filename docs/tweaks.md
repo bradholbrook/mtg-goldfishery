@@ -52,5 +52,17 @@ things were flowing
   Want me to implement this? The client-side could show "Queue position: 3..." → "Queue      
   position: 2..." → "Fetching your deck..." instead of just "Fetching...".
 
+# feature - user limiting
+  1. Per-IP rate limit in the function (simplest, most practical)               
+  - Track IP + timestamps in Firestore. Reject if >N requests per hour from same
+   IP.                                                                          
+  - No client changes. Stops queue-flooding.
+  - Not bulletproof (VPNs, etc.) but handles 99% of abuse.                      
+                                                                                
+  2. Firebase App Check + reCAPTCHA v3                                          
+  - Google's official answer for "protect backend from unauthorized clients"    
+  - Invisible reCAPTCHA, no user friction                                       
+  - But requires Firebase JS SDK on client — conflicts with your                
+  no-npm/no-framework setup (could load via CDN though)       
 
  
