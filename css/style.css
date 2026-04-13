@@ -1858,7 +1858,7 @@ details[open] .card-analysis-summary::before { transform: rotate(90deg); }
 .commander-hero-image {
   width: 240px;
   height: auto;
-  border-radius: 6px;
+  border-radius: 12px;
   flex-shrink: 0;
   border: 1px solid var(--border);
 }
@@ -2594,11 +2594,11 @@ details[open] .category-config-summary::before { transform: rotate(90deg); }
   cursor: pointer;
   flex-shrink: 0;
   background: var(--bg-2);
-  border-radius: 5px 5px 0 0;
+  border-radius: 10px 10px 0 0;
   height: 33px;
 }
 .card-stack-item--last {
-  border-radius: 5px;
+  border-radius: 10px;
   height: auto;
 }
 .card-stack-item--noimage {
@@ -2650,7 +2650,7 @@ details[open] .category-config-summary::before { transform: rotate(90deg); }
   width: 100%;
   height: auto;
   display: block;
-  border-radius: 8px;
+  border-radius: 12px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.85);
 }
 
@@ -3194,6 +3194,66 @@ details[open] .category-config-summary::before { transform: rotate(90deg); }
   font-size: 11px;
   color: var(--yellow);
   margin-top: 6px;
+}
+
+/* ─── Castability: Effective-Cost Override Row ──────────────────────────────── */
+.cast-cost-override {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: nowrap;
+  white-space: nowrap;
+  margin: 6px 0 8px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-2);
+}
+.cast-cost-override .calc-stepper { flex-shrink: 0; }
+.cast-cost-override .calc-stepper-btn { width: 24px; height: 26px; font-size: 14px; }
+.cast-cost-override .calc-stepper-value { min-width: 28px; line-height: 26px; font-size: 13px; }
+.cast-cost-override--active {
+  border-color: var(--accent);
+}
+.cast-cost-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-secondary);
+}
+.cost-color-pips {
+  display: flex;
+  gap: 4px;
+}
+.cost-color-pip {
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: opacity 0.1s, filter 0.1s, border-color 0.1s;
+}
+.cost-color-pip--off {
+  opacity: 0.3;
+  filter: grayscale(0.6);
+}
+.cost-color-pip--on {
+  border-color: var(--border-bright);
+}
+.cost-color-pip:hover {
+  opacity: 1;
+  filter: none;
+}
+.cost-reset-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-secondary);
+  font-size: 10px;
+  padding: 3px 8px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  margin-left: auto;
+}
+.cost-reset-btn:hover {
+  border-color: var(--border-bright);
+  color: var(--text-primary);
 }
 
 /* ─── Cascade / Discover Card Pile ────────────────────────────────────────── */

@@ -22,6 +22,35 @@ export function setLabTarget(t) { _labTarget = t; }
 let _colorTurn = null;
 export function setColorTurn(t) { _colorTurn = t; }
 
+// Per-deck "effective commander cost" overrides for the castability chart.
+// Each entry: { cmcDelta: number, colors: string[] | null }
+// `colors` null = use commander's own colors; array = user-chosen set.
+const _costOverrides = new Map();
+
+export function getCostOverride(deckId) {
+  return _costOverrides.get(deckId) ?? { cmcDelta: 0, colors: null };
+}
+export function setCostCmcDelta(deckId, delta) {
+  const cur = _costOverrides.get(deckId) ?? { cmcDelta: 0, colors: null };
+  _costOverrides.set(deckId, { ...cur, cmcDelta: delta });
+}
+export function toggleCostColor(deckId, color, defaultColors) {
+  const cur = _costOverrides.get(deckId) ?? { cmcDelta: 0, colors: null };
+  const base = cur.colors ?? [...defaultColors];
+  const next = base.includes(color) ? base.filter(c => c !== color) : [...base, color];
+  _costOverrides.set(deckId, { ...cur, colors: next });
+}
+export function resetCostOverride(deckId) {
+  _costOverrides.delete(deckId);
+}
+export function isCostOverrideActive(override, commanderColors) {
+  if (override.cmcDelta !== 0) return true;
+  if (!override.colors) return false;
+  if (override.colors.length !== commanderColors.length) return true;
+  const set = new Set(override.colors);
+  return !commanderColors.every(c => set.has(c));
+}
+
 
 // Last castability info text — set during render, read by window.__cast.showInfo()
 let _castInfoText = '';
@@ -272,6 +301,7 @@ export function extractDeckProfile(deck) {
   const rampCount   = rampCards.reduce((s, c) => s + c.quantity, 0);
 
   return {
+    deckId: deck.id,
     N, commander, commanderCmc, commanderColors, commanderColorIdentity,
     landCount, untappedLandCount, tappedLandCount,
     rampCount, rampBuckets, colorSources, landColorSources,
@@ -489,8 +519,8 @@ function countTarget(deck, target) {
 // ─── Section 1: Commander Castability ────────────────────────────────────────
 
 export function buildCastabilitySection(profile) {
-  const { commander, commanderCmc, commanderColors, colorSources,
-          N, landCount, rampCount, rampBuckets, tappedLandCount, tagsStatus } = profile;
+  const { commander, commanderCmc: baseCmc, commanderColors: baseColors, colorSources,
+          N, landCount, rampCount, rampBuckets, tappedLandCount, tagsStatus, deckId } = profile;
 
   if (!commander) {
     return `
@@ -532,9 +562,22 @@ export function buildCastabilitySection(profile) {
       </p>`;
   }
 
+  // Apply user's effective-cost override (cmc delta + color set)
+  const override = getCostOverride(deckId);
+  const baseGeneric = parseGenericCost(commander.manaCost);
+  const effectiveGeneric = Math.max(0, baseGeneric + override.cmcDelta);
+  const commanderColors = override.colors ?? baseColors;
+  // Treat each unique color as 1 pip (limitation: multi-pip like {G}{G}{G} collapses to 1).
+  // Fall back to baseCmc when override is inactive so we don't alter un-touched decks.
+  const overrideActive = isCostOverrideActive(override, baseColors);
+  const commanderCmc = overrideActive
+    ? Math.max(1, Math.min(20, effectiveGeneric + commanderColors.length))
+    : baseCmc;
+  const effectiveProfile = { ...profile, commanderCmc, commanderColors };
+
   // Compute badge
   const _turns = [1, 2, 3, 4, 5, 6, 7, 8];
-  const _probs = _turns.map(T => pCastOnTurn(T, profile));
+  const _probs = _turns.map(T => pCastOnTurn(T, effectiveProfile));
   const _thresh80 = _turns.find(T => Math.round(_probs[T - 1] * 100) >= 80) ?? null;
   const _badgeDelta = _thresh80 === null ? Infinity : _thresh80 - commanderCmc;
   const _badgeClass = _badgeDelta <= 0 ? 'good' : _badgeDelta === 1 ? 'warn' : 'bad';
@@ -544,7 +587,7 @@ export function buildCastabilitySection(profile) {
 
   // Turn probabilities T1..T8
   const turns = [1, 2, 3, 4, 5, 6, 7, 8];
-  const probs = turns.map(T => pCastOnTurn(T, profile));
+  const probs = turns.map(T => pCastOnTurn(T, effectiveProfile));
 
   const maxProb = Math.max(...probs, 0.01);
   const bars = turns.map((T, i) => {
@@ -552,7 +595,7 @@ export function buildCastabilitySection(profile) {
     const barH = Math.round((pct / maxProb) * 100);
     const color = Math.round(pct * 100) >= 80 ? 'var(--green)' : pct >= 0.50 ? 'var(--yellow)' : 'var(--red)';
     return `
-      <div class="mc-col" title="Turn ${T}: ${(pct * 100).toFixed(1)}%">
+      <div class="mc-col">
         <div class="mc-col-bar-wrap">
           <div class="mc-col-bar" style="height:${barH}%;background:${color}">
             <span class="mc-col-count mc-col-count--above" style="color:${color}">${(pct * 100).toFixed(0)}%</span>
@@ -590,7 +633,7 @@ export function buildCastabilitySection(profile) {
     let extraNeeded = null;
     for (let extra = 1; extra <= 30; extra++) {
       const modProfile = {
-        ...profile,
+        ...effectiveProfile,
         N: N + extra,
         landCount: landCount + extra,
         untappedLandCount: (profile.untappedLandCount ?? landCount) + extra,
@@ -622,14 +665,48 @@ export function buildCastabilitySection(profile) {
     recLine = `<div class="cast-rec-line">${parts.join(' · ')}</div>`;
   }
 
+  // ── Effective-cost override row (stepper + color pips) ──────────────────────
+  const WUBRG = ['W', 'U', 'B', 'R', 'G'];
+  const activeColorSet = new Set(commanderColors);
+  const pipButtons = WUBRG.map(c => {
+    const active = activeColorSet.has(c);
+    return `<button type="button"
+      class="cost-color-pip color-pip color-pip--${c} ${active ? 'cost-color-pip--on' : 'cost-color-pip--off'}"
+      onclick="window.__cast.toggleColor('${c}')"
+      title="${active ? 'Remove' : 'Add'} ${c}">${c}</button>`;
+  }).join('');
+  const resetBtn = overrideActive
+    ? `<button type="button" class="cost-reset-btn" onclick="window.__cast.resetCost()" title="Reset to commander's actual cost">↺ reset</button>`
+    : '';
+  const overrideRow = `
+    <div class="cast-cost-override${overrideActive ? ' cast-cost-override--active' : ''}">
+      <span class="cast-cost-label">Cost</span>
+      <div class="calc-stepper">
+        <button class="calc-stepper-btn" onclick="window.__cast.costDec()">−</button>
+        <span class="calc-stepper-value">${effectiveGeneric}</span>
+        <button class="calc-stepper-btn" onclick="window.__cast.costInc()">+</button>
+      </div>
+      <div class="cost-color-pips">${pipButtons}</div>
+      ${resetBtn}
+    </div>`;
+
   return `
     <div class="section-label" style="display:flex;align-items:center;gap:8px">
       Commander Castability
       <span class="cast-threshold-badge cast-threshold-badge--${_badgeClass}">80% by ${_badgeText}</span>
       <button class="info-icon-btn" onclick="window.__cast.showInfo()" title="Calculation details">ℹ</button>
     </div>
+    ${overrideRow}
     <div class="mc-col-chart mc-col-chart--cast">${bars}</div>
     ${recLine}`;
+}
+
+/** Sum of {N} generic symbols in a mana cost like "{3}{G}{U}" → 3. */
+export function parseGenericCost(manaCost) {
+  if (!manaCost) return 0;
+  let total = 0;
+  for (const m of manaCost.matchAll(/\{(\d+)\}/g)) total += parseInt(m[1], 10);
+  return total;
 }
 
 /** Mana analysis — color sources by turn. No dependency on tags/ramp. */
@@ -945,6 +1022,11 @@ function buildEffectSection(deck, def, defIdx) {
     </div>`;
 
   // Hit-target picker (shown when N > 1)
+  const hitSampleBtn = canCalc
+    ? `<button class="btn-secondary btn-sm" style="margin-top:6px;padding:2px 8px;font-size:10px"
+        onclick="window.__calc.showHitSample('${def.id}')">Show sample</button>`
+    : `<button class="btn-secondary btn-sm" style="margin-top:6px;padding:2px 8px;font-size:10px" disabled
+        title="Need at least ${hitTarget} hit${hitTarget > 1 ? 's' : ''} in deck">Show sample</button>`;
   const hitTargetPicker = lookAtN > 1 ? `
     <div style="margin-top:10px">
       <div class="input-label" style="margin-bottom:4px">Looking for (hits wanted)</div>
@@ -953,18 +1035,17 @@ function buildEffectSection(deck, def, defIdx) {
           <button class="hit-target-btn ${n === hitTarget ? 'hit-target-btn--active' : ''}"
             onclick="window.__calc.setHitTarget('${def.id}', ${n})">${n}</button>`).join('')}
       </div>
-    </div>` : '';
+      ${hitSampleBtn}
+    </div>` : `<div style="margin-top:10px">${hitSampleBtn}</div>`;
 
   // Criteria editor
   const criteriaHTML = buildEffectCriteriaEditor(deck, def, K);
 
-  // Graphs (only if K > 0)
-  const graphsHTML = criteria.length
-    ? `<div id="calc-graphs-${def.id}" class="calc-graphs-row" style="margin-top:16px">
-        ${buildNSensGraph(lookAtN, hitTarget, K)}
-        ${buildSrcSensGraph(lookAtN, hitTarget, K)}
-      </div>`
-    : `<p class="muted" style="font-size:11px;margin-top:12px">Add criteria above to see probability graphs.</p>`;
+  // Graphs always render — 0 criteria treated as "any card" (K = non-commander deck size)
+  const graphsHTML = `<div id="calc-graphs-${def.id}" class="calc-graphs-row" style="margin-top:16px">
+    ${buildNSensGraph(lookAtN, hitTarget, K)}
+    ${buildSrcSensGraph(lookAtN, hitTarget, K)}
+  </div>`;
 
   const isOpen = _openEffectIds.has(def.id);
 
@@ -1045,7 +1126,7 @@ function buildCalcCriterionRow(def, crit, idx, deck) {
 
   const sampleBtn = sampleCards.length
     ? `<button class="btn-secondary btn-sm" style="padding:1px 6px;font-size:10px"
-        onclick="window.__calc.showCritSample('${def.id}', ${idx})">Sample</button>`
+        onclick="window.__calc.showCritSample('${def.id}', ${idx})">Show</button>`
     : '';
 
   return `
@@ -1236,9 +1317,9 @@ function countMatchingForCriterion(deck, crit) {
 }
 
 function countMatchingCombined(deck, criteria) {
-  if (!criteria.length) return 0;
-  return deck.cards
-    .filter(c => !c.isCommander)
+  const nonCmdr = deck.cards.filter(c => !c.isCommander);
+  if (!criteria.length) return nonCmdr.reduce((s, c) => s + c.quantity, 0);
+  return nonCmdr
     .filter(c => criteria.some(crit => {
       const ct = CRITERION_TYPES[crit.type];
       return ct ? ct.evaluate({ ...crit, count: 1 }, [c]) : false;
@@ -1248,13 +1329,14 @@ function countMatchingCombined(deck, criteria) {
 
 /** Exported: used by app.js to build the hit-list modal */
 export function matchingCardsForEffect(deck, criteria) {
-  if (!criteria.length) return [];
-  return deck.cards
-    .filter(c => !c.isCommander)
-    .filter(c => criteria.some(crit => {
-      const ct = CRITERION_TYPES[crit.type];
-      return ct ? ct.evaluate({ ...crit, count: 1 }, [c]) : false;
-    }))
+  const nonCmdr = deck.cards.filter(c => !c.isCommander);
+  const hits = !criteria.length
+    ? nonCmdr
+    : nonCmdr.filter(c => criteria.some(crit => {
+        const ct = CRITERION_TYPES[crit.type];
+        return ct ? ct.evaluate({ ...crit, count: 1 }, [c]) : false;
+      }));
+  return hits
     .sort((a, b) => {
       const ta = CARD_TYPES.find(t => a.types?.includes(t)) || 'Other';
       const tb = CARD_TYPES.find(t => b.types?.includes(t)) || 'Other';

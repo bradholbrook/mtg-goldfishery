@@ -1,12 +1,12 @@
+
 # tweaks - overview tab
-- can we make the hover card image, commander image, and the card lists when using images all have rounded corners? some magic card images are square with white corners and it looks bad
 - it would be cool if clicking a MV bar on the MV chart or type pie/name on the type chart would filter the shown cards to that value/type. you could clik multiple of each to add results to the filter. the values not selected would gray out. each chart would have a 'clear filter' button maybe in its top right - clicking each value again would also remove that value from the filter. each graph could show an (I) icon in the header that explained how the filter works. The cards list would auto sort as criteria are selected/cleared.
 - the graph shows 3% to cast commander by turn 2. is there a way to tell what cards contributed to that or what the "perfect hand" would be?
 
-# tweaks - calculate tab for "off the top"
-- on the match criteia, the "sample" button should really say show, thats what it does
-- under the effect form, under # hits looking for - lets add a sample button that shows an N card sample of a valid hit
-- for the results graphs, lets just show them right away. we have a default N, and the default hits is anything so all the content can work. We can even add the first criterion entry by default for new effects
+# tweaks - calculate tab for "off the top", mull tab
+- on the match criteria, the "sample" button should really say show, thats what it does
+- under the effect form, under # hits looking for - lets add a sample button that shows an N card sample with a valid hit
+- for the results graphs, lets just show them right away. we have a default N, and the default hits is anything so all the content can work. We can even add the first criterion entry by default for new effects. this is true for the mulligan tab too - we have defaults, lets run a sim right away on new deck load.
 
 
  # 10. Test

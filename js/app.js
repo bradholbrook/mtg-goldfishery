@@ -32,6 +32,8 @@ import {
   setCascadeMV, setCascadeMode, setCascadeSort, setCascadeFilter,
   matchingCardsForEffect, matchingCardsForCriterion,
   buildNSensGraph, buildSrcSensGraph,
+  getCostOverride, setCostCmcDelta, toggleCostColor, resetCostOverride,
+  extractDeckProfile, parseGenericCost,
 } from './ui/calculate-tab.js';
 import { setBottomOpen } from './ui/config-tab.js';
 
@@ -278,6 +280,7 @@ function bindImportPanel() {
         clearImportPanel();
         showToast(`Imported "${deckPhase1.name}" — ${deckPhase1.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
         refresh();
+        maybeAutoSim(deckPhase1.id);
 
         // Phase 2: oracle tags in background (non-blocking)
         runTagEnrichment(deckPhase1.id, deckPhase1);
@@ -320,6 +323,7 @@ function bindImportPanel() {
         clearImportPanel();
         showToast(`Imported "${deckPhase1.name}" — ${deckPhase1.cards.reduce((s,c)=>s+c.quantity,0)} cards`, 'success');
         refresh();
+        maybeAutoSim(deckPhase1.id);
         // Phase 2: oracle tags in background (non-blocking)
         runTagEnrichment(deckPhase1.id, deckPhase1);
       } catch (err) {
@@ -330,6 +334,7 @@ function bindImportPanel() {
         clearImportPanel();
         showToast(`Imported "${deck.name}" without enrichment (${err.message})`, 'warn');
         refresh();
+        maybeAutoSim(deck.id);
       } finally {
         importBtn.disabled = false;
         importBtn.textContent = 'Import';
@@ -351,6 +356,15 @@ function handleSelectDeck(deckId) {
   });
 
   refresh();
+  maybeAutoSim(deckId);
+}
+
+/** Kick off a mulligan simulation on first view of a deck (no prior results). */
+function maybeAutoSim(deckId) {
+  const deck = getDeckById(deckId);
+  if (!deck) return;
+  if (getResultsForDeck(deckId).length > 0) return;
+  handleRunSimulation(deckId);
 }
 
 function handleDeleteDeck(deckId) {
@@ -1234,6 +1248,33 @@ window.__cast = {
       confirmLabel: 'Close',
     });
   },
+  costInc() {
+    if (!activeDeckId) return;
+    const cur = getCostOverride(activeDeckId);
+    setCostCmcDelta(activeDeckId, cur.cmcDelta + 1);
+    refresh();
+  },
+  costDec() {
+    if (!activeDeckId) return;
+    const deck = getDeckById(activeDeckId);
+    const baseGeneric = deck ? parseGenericCost(deck.cards.find(c => c.isCommander)?.manaCost) : 0;
+    const cur = getCostOverride(activeDeckId);
+    setCostCmcDelta(activeDeckId, Math.max(-baseGeneric, cur.cmcDelta - 1));
+    refresh();
+  },
+  toggleColor(color) {
+    if (!activeDeckId) return;
+    const deck = getDeckById(activeDeckId);
+    if (!deck) return;
+    const profile = extractDeckProfile(deck);
+    toggleCostColor(activeDeckId, color, profile.commanderColors);
+    refresh();
+  },
+  resetCost() {
+    if (!activeDeckId) return;
+    resetCostOverride(activeDeckId);
+    refresh();
+  },
 };
 
 window.__sim = {
@@ -1261,7 +1302,9 @@ window.__calc = {
     const deck = getDeckById(activeDeckId);
     if (!deck) return;
     const id = generateId();
-    updateEffectDef(deck.id, { id, name: '', lookAtN: 3, hitTarget: 1, criteria: [] });
+    const first = CRITERION_TYPE_OPTIONS[0];
+    const defaultCrit = { type: first.id, ...first.defaultValues() };
+    updateEffectDef(deck.id, { id, name: '', lookAtN: 3, hitTarget: 1, criteria: [defaultCrit] });
     setEffectOpen(id, true);
     refresh();
   },
@@ -1420,6 +1463,66 @@ window.__calc = {
     if (!cards.length) { showToast('No cards match this criterion.', 'info'); return; }
     showCardListModal('Sample — Criterion Matches', cards);
   },
+
+  showHitSample(defId) {
+    const deck = getDeckById(activeDeckId);
+    const def  = deck?.effectDefs?.find(d => d.id === defId);
+    if (!deck || !def) return;
+    const lookAtN   = def.lookAtN  || 3;
+    const hitTarget = def.hitTarget || 1;
+    const criteria  = def.criteria || [];
+    const hits = new Set(matchingCardsForEffect(deck, criteria).map(c => c.name));
+    const flat = flattenDeck(deck).filter(c => !c.isCommander);
+    if (flat.length < lookAtN) { showToast('Deck too small for this sample size.', 'info'); return; }
+    const hitCount = flat.filter(c => hits.has(c.name)).length;
+    if (hitCount < hitTarget) { showToast(`Only ${hitCount} hit${hitCount === 1 ? '' : 's'} in deck — need ${hitTarget}.`, 'info'); return; }
+
+    // Rejection sample: shuffle, take first N, retry until ≥ hitTarget are hits
+    let sample = null;
+    for (let tries = 0; tries < 200; tries++) {
+      const shuffled = [...flat].sort(() => Math.random() - 0.5).slice(0, lookAtN);
+      if (shuffled.filter(c => hits.has(c.name)).length >= hitTarget) { sample = shuffled; break; }
+    }
+    if (!sample) {
+      // Fallback: force-include hitTarget hits + fill from remaining
+      const hitPool  = flat.filter(c => hits.has(c.name)).sort(() => Math.random() - 0.5);
+      const forced   = hitPool.slice(0, hitTarget);
+      const pool     = flat.filter(c => !forced.includes(c)).sort(() => Math.random() - 0.5);
+      sample = [...forced, ...pool.slice(0, lookAtN - hitTarget)].sort(() => Math.random() - 0.5);
+    }
+
+    // Render as image row in a modal
+    const imgsHTML = sample.map(c => {
+      const imgUrl   = (c.imageUrl || '').replace(/"/g, '&quot;');
+      const backUrl  = (c.backImageUrl || '').replace(/"/g, '&quot;');
+      const isHit    = hits.has(c.name);
+      const border   = isHit ? '3px solid var(--green)' : '3px solid transparent';
+      const safeName = c.name.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+      return imgUrl
+        ? `<div style="display:flex;flex-direction:column;align-items:center;gap:4px">
+            <img src="${imgUrl}" alt="${safeName}" loading="lazy"
+              style="width:120px;border-radius:10px;border:${border};display:block"
+              data-image-url="${imgUrl}" data-back-image-url="${backUrl}"
+              onmouseenter="window.__preview?.show(this.dataset.imageUrl, this.dataset.backImageUrl)"
+              onmouseleave="window.__preview?.hide()" />
+          </div>`
+        : `<div style="width:120px;padding:8px;border:${border};border-radius:8px;font-size:11px;background:var(--bg-2)">${safeName}</div>`;
+    }).join('');
+
+    document.querySelector('.calc-card-modal-overlay')?.remove();
+    const overlay = document.createElement('div');
+    overlay.className = 'calc-card-modal-overlay hands-modal-overlay';
+    overlay.innerHTML = `
+      <div class="hands-modal">
+        <div class="hands-modal-header">
+          <span>Sample top ${lookAtN} (≥${hitTarget} hit${hitTarget > 1 ? 's' : ''} highlighted)</span>
+          <button class="btn-icon" onclick="this.closest('.calc-card-modal-overlay').remove()">✕</button>
+        </div>
+        <div class="hands-modal-body" style="flex-wrap:wrap;gap:8px;padding:12px">${imgsHTML}</div>
+      </div>`;
+    overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+    document.body.appendChild(overlay);
+  },
 };
 
 window.__cascade = {
@@ -1512,6 +1615,7 @@ function bindSaveLoad() {
         activeDeckId = decks[0].id;
       }
       refresh();
+      if (activeDeckId) maybeAutoSim(activeDeckId);
     } catch (err) {
       showToast(`Load failed: ${err.message}`, 'error');
     }
